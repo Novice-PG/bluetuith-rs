@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=bluetuith-rs
+GenericName=Bluetooth Manager
+Comment=Full-featured Bluetooth manager for the terminal
+Exec=bluetuith-rs
+Terminal=true
+Categories=Utility;System;
+Keywords=bluetooth;bluez;tui;terminal;
+StartupNotify=false

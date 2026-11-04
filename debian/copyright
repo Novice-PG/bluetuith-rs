@@ -1,0 +1,13 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: bluetuith-rs
+Source: https://github.com/Novice-PG/bluetuith-rs
+
+Files: *
+Copyright: 2026 bluetuith-rs contributors
+License: Apache-2.0
+ On Debian systems the complete text of the Apache License Version 2.0
+ can be found in /usr/share/common-licenses/Apache-2.0.
+ .
+ This project is an independent, clean-room reimplementation in Rust of the
+ idea behind bluetuith (a terminal Bluetooth manager). It contains no code
+ from bluetuith, which is MIT-licensed, Copyright (c) 2022 darkhz.

@@ -1,0 +1,28 @@
+# bluetuith-rs example configuration
+# Copy to ~/.config/bluetuith-rs/config.toml (or run `bluetuith-rs --generate`).
+
+adapter = "hci0"                 # adapter name or MAC; empty = first adapter
+receive-dir = ""                 # inbound OBEX files; empty = ~/Downloads/bluetuith-rs
+gsm-apn = ""                     # APN for DUN dial-up networking
+gsm-number = "*99#"              # number to dial for DUN
+adapter-states = ""              # e.g. "powered:yes,discoverable:no,scan:no"
+connect-bdaddr = ""              # auto-connect this device on startup
+
+no-warning = false               # suppress the unavailable-features banner
+no-help-display = false          # hide the bottom keybinding strip
+confirm-on-quit = true           # ask "Quit (y/n)?" before exiting
+disable-obex-services = false    # disable OBEX services
+
+theme = "Midnight"               # Midnight | Nord | Catppuccin | Dracula |
+                                 # Gruvbox | Tokyo Night | Rosé Pine |
+                                 # Solarized | Daylight
+accent = ""                      # optional override, e.g. "#5ec4ff"
+default-sort = "Name"            # Name | Address | Rssi | Battery | State | Kind
+show-hidden-files = false
+scan-on-start = false
+demo = false                     # run against a simulated adapter
+
+[keybindings]
+# Quit = "Ctrl+q"
+# Scan = "s"
+# ThemePicker = "F4"

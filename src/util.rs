@@ -1,0 +1,124 @@
+//! Small formatting helpers shared by the views.
+
+use unicode_width::UnicodeWidthStr;
+
+pub fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} {}", UNITS[i])
+    } else {
+        format!("{v:.1} {}", UNITS[i])
+    }
+}
+
+pub fn duration(ms: u64) -> String {
+    let total = ms / 1000;
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    let s = total % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// Truncate to a display width, adding an ellipsis when cut.
+pub fn truncate(s: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(s) <= width {
+        return s.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut w = 0;
+    for c in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if w + cw + 1 > width {
+            break;
+        }
+        out.push(c);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
+pub fn pad(s: &str, width: usize) -> String {
+    let w = UnicodeWidthStr::width(s);
+    if w >= width {
+        truncate(s, width)
+    } else {
+        format!("{s}{}", " ".repeat(width - w))
+    }
+}
+
+/// Unicode block signal bars, e.g. `▂▄▆█`.
+pub fn signal_glyph(bars: u8) -> &'static str {
+    match bars {
+        0 => "────",
+        1 => "▂───",
+        2 => "▂▄──",
+        3 => "▂▄▆─",
+        4 => "▂▄▆█",
+        _ => "▂▄▆█",
+    }
+}
+
+pub fn battery_glyph(pct: u8) -> &'static str {
+    match pct {
+        0..=10 => "▯",
+        11..=35 => "▮▯▯",
+        36..=65 => "▮▮▯",
+        66..=90 => "▮▮▮",
+        _ => "▮▮▮",
+    }
+}
+
+pub fn spinner(tick: u64) -> &'static str {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    FRAMES[(tick as usize / 2) % FRAMES.len()]
+}
+
+pub fn title_case(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_bytes_scales() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1024), "1.0 KiB");
+        assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
+    }
+
+    #[test]
+    fn duration_formats() {
+        assert_eq!(duration(0), "0:00");
+        assert_eq!(duration(161_000), "2:41");
+        assert_eq!(duration(3_661_000), "1:01:01");
+    }
+
+    #[test]
+    fn truncate_respects_display_width() {
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(
+            UnicodeWidthStr::width(truncate("hello world", 6).as_str()),
+            6
+        );
+    }
+}

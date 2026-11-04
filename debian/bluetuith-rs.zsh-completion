@@ -1,0 +1,24 @@
+#compdef bluetuith-rs
+_arguments -s \
+  '(-l --list-adapters)'{-l,--list-adapters}'[list adapters and exit]' \
+  '(-g --generate)'{-g,--generate}'[write default config]' \
+  '(-a --adapter)'{-a,--adapter}'[adapter]:adapter:' \
+  '(-r --receive-dir)'{-r,--receive-dir}'[receive dir]:dir:_files -/' \
+  '(-m --gsm-apn)'{-m,--gsm-apn}'[APN]:apn:' \
+  '(-b --gsm-number)'{-b,--gsm-number}'[number]:number:' \
+  '(-s --adapter-states)'{-s,--adapter-states}'[states]:states:' \
+  '(-t --connect-bdaddr)'{-t,--connect-bdaddr}'[MAC]:mac:' \
+  '(-w --no-warning)'{-w,--no-warning}'[no warnings]' \
+  '(-i --no-help-display)'{-i,--no-help-display}'[hide help strip]' \
+  '(-c --confirm-on-quit)'{-c,--confirm-on-quit}'[confirm on quit]' \
+  '--no-confirm-on-quit[quit immediately]' \
+  '(-o --disable-obex-services)'{-o,--disable-obex-services}'[disable OBEX]' \
+  '--show-hidden-files[show hidden files]' \
+  '--scan-on-start[start scanning]' \
+  '--theme[palette]:theme:(Midnight Nord Catppuccin Dracula Gruvbox "Tokyo Night" "Rosé Pine" Solarized Daylight)' \
+  '--accent[accent colour]:hex:' \
+  '--default-sort[sort]:key:(Name Address Rssi Battery State Kind)' \
+  '--config[config file]:file:_files' \
+  '--demo[simulated adapter]' \
+  '(-h --help)'{-h,--help}'[help]' \
+  '(-V --version)'{-V,--version}'[version]'

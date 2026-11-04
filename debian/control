@@ -1,0 +1,22 @@
+Source: bluetuith-rs
+Section: utils
+Priority: optional
+Maintainer: bluetuith-rs contributors <bluetuith-rs@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13), cargo, rustc
+Standards-Version: 4.6.2
+Homepage: https://github.com/Novice-PG/bluetuith-rs
+Rules-Requires-Root: no
+
+Package: bluetuith-rs
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Suggests: bluez, bluez-obexd
+Description: full-featured Bluetooth manager for the terminal (ratatui)
+ bluetuith-rs is a terminal user interface for managing Bluetooth adapters
+ and devices over BlueZ D-Bus. It provides adapter power/discovery control,
+ device pairing and connection, OBEX Object Push file transfers with progress,
+ AVRCP media playback, PAN networking, audio profiles and a pairing agent.
+ .
+ The interface is built with ratatui and supports mouse input, configurable
+ keybindings, nine colour themes, search/filter and a --demo mode that runs
+ without Bluetooth hardware.

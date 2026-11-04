@@ -1,0 +1,106 @@
+.TH BLUETUITH-RS 1 "2026-11-04" "bluetuith-rs 0.1.0" "User Commands"
+.SH NAME
+bluetuith-rs \- a full-featured Bluetooth manager for the terminal
+.SH SYNOPSIS
+.B bluetuith-rs
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B bluetuith-rs
+is a terminal user interface for managing Bluetooth adapters and devices.
+It talks to BlueZ over the system D-Bus and provides adapter control, device
+discovery/pairing/connection, OBEX Object Push file transfers, AVRCP media
+playback, PAN networking and audio profile views. The interface is built with
+ratatui and supports the mouse, configurable keybindings and multiple colour
+themes.
+.PP
+With
+.B \-\-demo
+the application runs against a built-in simulated adapter, so it can be used
+(and tested) on machines without Bluetooth hardware.
+.SH OPTIONS
+.TP
+.BR \-l ", " \-\-list-adapters
+List available adapters and exit.
+.TP
+.BR \-g ", " \-\-generate
+Write a default configuration file and exit.
+.TP
+.BR \-a ", " \-\-adapter " " \fINAME\fR
+Adapter to use (e.g. hci0 or a MAC address).
+.TP
+.BR \-r ", " \-\-receive-dir " " \fIDIR\fR
+Directory for received OBEX files.
+.TP
+.BR \-m ", " \-\-gsm-apn " " \fIAPN\fR
+APN for DUN dial-up networking.
+.TP
+.BR \-b ", " \-\-gsm-number " " \fINUMBER\fR
+Number to dial for DUN (default *99#).
+.TP
+.BR \-s ", " \-\-adapter-states " " \fILIST\fR
+Startup states, e.g. 'powered:yes,discoverable:yes,scan:no'.
+.TP
+.BR \-t ", " \-\-connect-bdaddr " " \fIMAC\fR
+Auto-connect this device on startup.
+.TP
+.BR \-w ", " \-\-no-warning
+Suppress the unavailable-features banner.
+.TP
+.BR \-i ", " \-\-no-help-display
+Hide the bottom keybinding strip.
+.TP
+.BR \-c ", " \-\-confirm-on-quit
+Ask for confirmation before quitting.
+.TP
+.B "\-\-no-confirm-on-quit"
+Quit immediately.
+.TP
+.BR \-o ", " \-\-disable-obex-services
+Disable OBEX services.
+.TP
+.B "\-\-show-hidden-files"
+Show hidden files in the file picker.
+.TP
+.B "\-\-scan-on-start"
+Start discovery at launch.
+.TP
+.BR "\-\-theme " \fINAME\fR
+Palette: Midnight, Nord, Catppuccin, Dracula, Gruvbox, Tokyo Night,
+Rosé Pine, Solarized or Daylight.
+.TP
+.BR "\-\-accent " \fI#RRGGBB\fR
+Override the accent colour.
+.TP
+.BR "\-\-default-sort " \fIKEY\fR
+Name, Address, Rssi, Battery, State or Kind.
+.TP
+.BR "\-\-config " \fIPATH\fR
+Use an alternate configuration file.
+.TP
+.B "\-\-demo"
+Run against a simulated adapter (no BlueZ required).
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.TP
+.BR \-V ", " \-\-version
+Print version.
+.SH KEYBINDINGS
+Navigate with the arrow keys. c connect/disconnect, p pair, t trust,
+b block, d remove, o power, S discoverable, P pairable, s scan,
+a change adapter, f send files, v transfers, m media player,
+n network options, A audio profiles, i device info, / search,
+F2 details, F3 sort, F4 theme, F6 log, Ctrl+p command palette,
+Alt+m menu, ? help, Q quit, Ctrl+z suspend, Ctrl+x cancel, Esc close.
+.SH FILES
+.TP
+.I ~/.config/bluetuith-rs/config.toml
+User configuration.
+.SH ENVIRONMENT
+Options may also be set through BLUETUITH_RS_* variables (the BLUETUITH_*
+forms used by the original bluetuith are accepted as aliases).
+.SH SEE ALSO
+.BR bluetoothctl (1),
+.BR bluetoothd (8)
+.SH AUTHORS
+bluetuith-rs contributors. Inspired by bluetuith by darkhz.
