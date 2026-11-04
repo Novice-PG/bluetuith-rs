@@ -140,20 +140,22 @@ jobs:
           ]:
               shutil.copy2(src, pkg/dst)
           installed = sum(f.stat().st_size for f in (pkg/"usr").rglob("*") if f.is_file()) // 1024
-          (pkg/"DEBIAN/control").write_text(f"""Package: bluetuith-rs
-Version: {version}-1
-Section: utils
-Priority: optional
-Architecture: {arch}
-Maintainer: bluetuith-rs contributors <bluetuith-rs@users.noreply.github.com>
-Homepage: https://github.com/Novice-PG/bluetuith-rs
-Installed-Size: {installed}
-Depends: libc6
-Suggests: bluez, bluez-obexd
-Description: full-featured Bluetooth manager for the terminal (ratatui)
- A terminal UI for managing Bluetooth adapters and devices over BlueZ D-Bus,
- built with ratatui. Statically linked except for glibc on this architecture.
-""")
+          control = "\n".join([
+              "Package: bluetuith-rs",
+              f"Version: {version}-1",
+              "Section: utils",
+              "Priority: optional",
+              f"Architecture: {arch}",
+              "Maintainer: bluetuith-rs contributors <bluetuith-rs@users.noreply.github.com>",
+              "Homepage: https://github.com/Novice-PG/bluetuith-rs",
+              f"Installed-Size: {installed}",
+              "Depends: libc6",
+              "Suggests: bluez, bluez-obexd",
+              "Description: full-featured Bluetooth manager for the terminal (ratatui)",
+              " A terminal UI for managing Bluetooth adapters and devices over BlueZ D-Bus,",
+              " built with ratatui. Statically linked except for glibc on this architecture.",
+          ]) + "\n"
+          (pkg/"DEBIAN/control").write_text(control)
           subprocess.run(["dpkg-deb", "--build", "--root-owner-group", str(pkg),
                           str(out/f"bluetuith-rs_{version}_{arch}.deb")], check=True)
           shutil.rmtree(pkg)
