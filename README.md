@@ -69,12 +69,15 @@ Rust. It keeps feature parity with the original and adds a few extras.
 
 ### Debian / Ubuntu package
 
-Prebuilt static binaries are published as `.deb` packages for every Linux
-architecture (see [Releases](#building-deb-packages-for-all-linux-architectures)):
+`.deb` packages for every Linux architecture are produced by
+`packaging/build-debs.sh` (locally) and by the CI matrix; pushing a `v*` tag
+attaches them all to the GitHub Release. To build them yourself:
 
 ```sh
-sudo dpkg -i bluetuith-rs_0.1.0_amd64.deb      # or arm64, armhf, armel, i386,
-                                                # ppc64el, riscv64, loong64, ppc64 …
+./packaging/build-debs.sh
+sudo dpkg -i packaging/out/bluetuith-rs_0.1.0_amd64.deb   # or arm64, armhf,
+                                                          # armel, i386, ppc64el,
+                                                          # riscv64, loong64, ppc64
 ```
 
 The package installs `/usr/bin/bluetuith-rs`, a man page, a desktop entry,
