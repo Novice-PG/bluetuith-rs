@@ -95,8 +95,12 @@ build_one() {
 
   local envname
   envname="$(printf '%s' "$triple" | tr '[:lower:]-' '[:upper:]_')"
-  echo "-> cargo build (linker=rust-lld)"
+  # Some tier-2 musl targets (riscv64gc, loongarch64, powerpc64) default to
+  # *dynamic* -lc/-lgcc_s. Force a fully static link so rust-lld can use the
+  # self-contained musl objects shipped with the target's std.
+  echo "-> cargo build (linker=rust-lld, static)"
   env "CARGO_TARGET_${envname}_LINKER=rust-lld" \
+    RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static" \
     cargo build --release --target "$triple" --bin bluetuith-rs ${OFFLINE_FLAG:+$OFFLINE_FLAG}
 
   local bin="target/${triple}/release/bluetuith-rs"
