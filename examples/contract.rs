@@ -653,7 +653,7 @@ fn main() -> anyhow::Result<()> {
     check(
         &mut r,
         "SetAdapterProperty -> Properties.Set(Powered,true)",
-        { has(&c, "Adapter1", "Set", "Powered=true") },
+        has(&c, "Adapter1", "Set", "Powered=true"),
     );
     let c = run_cmd(&mut app, &s, Command::SetScan(true), 250);
     check(
@@ -701,7 +701,7 @@ fn main() -> anyhow::Result<()> {
     check(
         &mut r,
         "RemoveDevice -> Adapter1.RemoveDevice(correct path)",
-        { has(&c, "Adapter1", "RemoveDevice", DEV) },
+        has(&c, "Adapter1", "RemoveDevice", DEV),
     );
 
     println!("=== D-Bus call contract (network) ===");
@@ -751,7 +751,7 @@ fn main() -> anyhow::Result<()> {
     check(
         &mut r,
         "ConnectNetwork(DUN) fires no call and reports reserved",
-        { !has(&c, "Network1", "Connect", "") && app.status.text.contains("DUN") },
+        !has(&c, "Network1", "Connect", "") && app.status.text.contains("DUN"),
     );
     let id = app.networks.first().map(|n| n.id).unwrap_or(999_999);
     let c = run_cmd(&mut app, &s, Command::DisconnectNetwork(id), 250);
@@ -1002,7 +1002,7 @@ fn main() -> anyhow::Result<()> {
     check(
         &mut r,
         "disabled backend refuses SendFiles without a call",
-        { c.is_empty() && app2.status.text.contains("OBEX services are disabled") },
+        c.is_empty() && app2.status.text.contains("OBEX services are disabled"),
     );
 
     println!("\n=== result: {} passed, {} failed ===", r.pass, r.fail);
