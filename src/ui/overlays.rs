@@ -10,17 +10,74 @@ use ratatui::Frame;
 use super::{centered_rect, modal, panel};
 use crate::app::{App, Overlay};
 use crate::backend::service_name;
-use crate::keybind::Context;
+use crate::i18n::{fill, Lang, Tr};
+use crate::keybind::{Action, Context};
 use crate::model::*;
 use crate::theme::Theme;
 use crate::util;
 
-fn boxed(frame: &mut Frame<'_>, app: &App, title: &str, w: u16, h: u16) -> Rect {
+fn boxed(frame: &mut Frame<'_>, app: &mut App, title: &str, w: u16, h: u16) -> Rect {
     let area = centered_rect(w, h, frame.area());
+    app.layout.overlay_rect = Some(area);
     modal(frame, area, title, app)
 }
 
-fn footer<'a>(app: &App, hints: &[(&str, &str)]) -> Line<'a> {
+/// The live key label for an action (so footers follow user rebindings).
+fn key(app: &App, a: Action) -> String {
+    app.keys.label(a)
+}
+
+/// `↑↓` (or whatever the up/down keys are bound to).
+fn nav_keys(app: &App) -> String {
+    format!(
+        "{}{}",
+        key(app, Action::NavigateUp),
+        key(app, Action::NavigateDown)
+    )
+}
+
+/// Clamp the scroll offset to the content so scrolling past the end cannot
+/// leave an empty window, and write the corrected value back to the app.
+/// Localised description for a known audio profile (the backend emits
+/// English text, so map by profile name here).
+fn profile_desc(name: &str, lang: Lang) -> &'static str {
+    let tr = lang.tr();
+    match name {
+        "A2DP Source" => tr.pf_d_a2dp_src,
+        "A2DP Sink" => tr.pf_d_a2dp_sink,
+        "HSP" => tr.pf_d_hsp,
+        "HFP" => tr.pf_d_hfp,
+        "AVRCP" => tr.pf_d_avrcp,
+        _ => "",
+    }
+}
+
+fn clamp_scroll(app: &mut App, nlines: usize, height: u16) -> u16 {
+    let max_off = nlines.saturating_sub(height as usize);
+    let off = app.overlay_scroll.min(max_off);
+    app.overlay_scroll = off;
+    off as u16
+}
+
+/// How many terminal rows a wrapped `Paragraph` actually occupies. Using the
+/// raw `lines.len()` undercounts wrapped long lines, which would make the
+/// scroll clamp stop before the last lines are reachable.
+fn wrapped_lines(lines: &[Line<'_>], width: u16) -> usize {
+    let w = (width as usize).max(1);
+    lines
+        .iter()
+        .map(|l| {
+            let cols: usize = l
+                .spans
+                .iter()
+                .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+                .sum();
+            cols.div_ceil(w).max(1)
+        })
+        .sum()
+}
+
+fn footer<'a>(app: &App, hints: &[(String, &'static str)]) -> Line<'a> {
     let t = &app.theme;
     let mut v = vec![Span::raw(" ")];
     for (key, label) in hints {
@@ -42,10 +99,10 @@ fn list(
     inner: Rect,
     lines: Vec<Line<'static>>,
     index: usize,
-    app: &App,
+    app: &mut App,
     footer_line: Line<'static>,
 ) {
-    let t = &app.theme;
+    let t = app.theme.clone();
     let h = inner.height.saturating_sub(2) as usize;
     let start = if index >= h { index - h + 1 } else { 0 };
     for i in 0..h {
@@ -65,6 +122,7 @@ fn list(
             Style::new()
         };
         frame.render_widget(Paragraph::new(line.clone()).style(style), r);
+        app.layout.overlay_items.push((r, idx));
     }
     let fr = Rect {
         x: inner.x,
@@ -78,6 +136,10 @@ fn list(
 pub fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let overlays = app.overlays.clone();
     for o in overlays {
+        // Each overlay resets the hit-test regions; the topmost (drawn last)
+        // therefore owns the mouse.
+        app.layout.overlay_rect = None;
+        app.layout.overlay_items.clear();
         match o {
             Overlay::Menu => menu(frame, app, area),
             Overlay::Help => help(frame, app),
@@ -103,8 +165,16 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 fn menu(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let t = app.theme.clone();
     let items = app.menu_items.clone();
-    let max_label = items.iter().map(|i| i.label.len()).max().unwrap_or(10);
-    let max_hint = items.iter().map(|i| i.hint.len()).max().unwrap_or(4);
+    let max_label = items
+        .iter()
+        .map(|i| unicode_width::UnicodeWidthStr::width(i.label.as_str()))
+        .max()
+        .unwrap_or(10);
+    let max_hint = items
+        .iter()
+        .map(|i| unicode_width::UnicodeWidthStr::width(i.hint.as_str()))
+        .max()
+        .unwrap_or(4);
     let w = (max_label + max_hint + 10) as u16;
     let w = w.clamp(32, 52).min(area.width.saturating_sub(2));
     let h = (items.len() as u16 + 2).min(area.height.saturating_sub(3));
@@ -120,14 +190,23 @@ fn menu(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     };
 
     frame.render_widget(Clear, rect);
-    let block = panel(app.menu_id.label(), &t, true);
+    let block = panel(app.menu_id.label(app.lang), &t, true);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+    app.layout.overlay_rect = Some(rect);
 
-    for (i, it) in items.iter().enumerate() {
-        if i as u16 >= inner.height {
-            break;
-        }
+    // Menus can be taller than the terminal (e.g. the 10-item Adapter menu on
+    // a 40x12 screen). Scroll the list so the highlighted row is always
+    // visible and hit-testable, instead of silently hiding the last items.
+    let h = inner.height as usize;
+    let start = if app.menu_index >= h {
+        app.menu_index - h + 1
+    } else {
+        0
+    };
+    for i in 0..h {
+        let idx = start + i;
+        let Some(it) = items.get(idx) else { break };
         let r = Rect {
             x: inner.x,
             y: inner.y + i as u16,
@@ -136,20 +215,28 @@ fn menu(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         };
         let fg = if !it.enabled {
             t.dim
-        } else if i == app.menu_index {
+        } else if idx == app.menu_index {
             t.selection_fg
         } else {
             t.fg
         };
-        let gap = (inner.width as usize).saturating_sub(it.label.len() + it.hint.len() + 4);
+        let gap = (inner.width as usize).saturating_sub(
+            unicode_width::UnicodeWidthStr::width(it.label.as_str())
+                + unicode_width::UnicodeWidthStr::width(it.hint.as_str())
+                + 4,
+        );
         let line = Line::from(vec![
             Span::styled(
-                if i == app.menu_index { " ▸ " } else { "   " },
+                if idx == app.menu_index {
+                    " ▸ "
+                } else {
+                    "   "
+                },
                 Style::new().fg(t.accent),
             ),
             Span::styled(
                 it.label.clone(),
-                Style::new().fg(fg).add_modifier(if i == app.menu_index {
+                Style::new().fg(fg).add_modifier(if idx == app.menu_index {
                     Modifier::BOLD
                 } else {
                     Modifier::empty()
@@ -162,12 +249,13 @@ fn menu(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             ),
             Span::raw(" "),
         ]);
-        let style = if i == app.menu_index {
+        let style = if idx == app.menu_index {
             Style::new().bg(t.selection_bg)
         } else {
             Style::new()
         };
         frame.render_widget(Paragraph::new(line).style(style), r);
+        app.layout.overlay_items.push((r, idx));
     }
 }
 
@@ -175,7 +263,8 @@ fn menu(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
 fn help(frame: &mut Frame<'_>, app: &mut App) {
     let t = app.theme.clone();
-    let inner = boxed(frame, app, Overlay::Help.title(), 78, 30);
+    let tr = app.tr();
+    let inner = boxed(frame, app, Overlay::Help.title(app.lang), 78, 30);
     let mut lines: Vec<Line<'static>> = vec![
         Line::from(vec![
             Span::styled(
@@ -186,7 +275,7 @@ fn help(frame: &mut Frame<'_>, app: &mut App) {
                 format!("v{}  ", env!("CARGO_PKG_VERSION")),
                 Style::new().fg(t.dim),
             ),
-            Span::styled("— keyboard reference", Style::new().fg(t.muted)),
+            Span::styled(tr.hv_ref, Style::new().fg(t.muted)),
         ]),
         Line::from(Span::styled(
             "─".repeat(inner.width as usize),
@@ -194,28 +283,31 @@ fn help(frame: &mut Frame<'_>, app: &mut App) {
         )),
         Line::raw(""),
     ];
-    let mut current = Context::App;
-    for (ctx, name, key) in app.keys.rows() {
-        if ctx != current {
-            current = ctx;
+    let mut current: Option<Context> = None;
+    for (ctx, name, key) in app.keys.rows(app.lang) {
+        if Some(ctx) != current {
+            current = Some(ctx);
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
-                format!("  {}", ctx.label()),
+                format!("  {}", ctx.label_for(app.lang)),
                 Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
             )));
         }
         lines.push(Line::from(vec![
-            Span::styled(format!("    {:<24}", name), Style::new().fg(t.fg)),
+            Span::styled(
+                format!("    {}", util::pad(name, 24)),
+                Style::new().fg(t.fg),
+            ),
             Span::styled(format!(" {}", key), Style::new().fg(t.muted)),
         ]));
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
-        "  Override any binding in ~/.config/bluetuith-rs/config.toml under [keybindings].",
+        tr.hv_override,
         Style::new().fg(t.dim),
     )));
     lines.push(Line::from(Span::styled(
-        "  Mouse: click a menu or a device row, double-click to connect, scroll to navigate.",
+        tr.hv_mouse,
         Style::new().fg(t.dim),
     )));
 
@@ -225,10 +317,11 @@ fn help(frame: &mut Frame<'_>, app: &mut App) {
         width: inner.width,
         height: inner.height.saturating_sub(2),
     };
+    let off = clamp_scroll(app, wrapped_lines(&lines, body.width), body.height);
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
-            .scroll((app.overlay_scroll as u16, 0)),
+            .scroll((off, 0)),
         body,
     );
     let fr = Rect {
@@ -237,14 +330,24 @@ fn help(frame: &mut Frame<'_>, app: &mut App) {
         width: inner.width,
         height: 2,
     };
-    frame.render_widget(footer(app, &[("↑↓", "scroll"), ("Esc", "close")]), fr);
+    frame.render_widget(
+        footer(
+            app,
+            &[
+                (nav_keys(app), tr.f_scroll),
+                (key(app, Action::Close), tr.f_close),
+            ],
+        ),
+        fr,
+    );
 }
 
 // ---------------------------------------------------------------------------
 
 fn confirm(frame: &mut Frame<'_>, app: &mut App) {
     let t = app.theme.clone();
-    let inner = boxed(frame, app, Overlay::Confirm.title(), 52, 7);
+    let tr = app.tr();
+    let inner = boxed(frame, app, Overlay::Confirm.title(app.lang), 52, 7);
     let text = app
         .confirm
         .as_ref()
@@ -264,7 +367,13 @@ fn confirm(frame: &mut Frame<'_>, app: &mut App) {
         },
     );
     frame.render_widget(
-        footer(app, &[("Y / Enter", "confirm"), ("N / Esc", "cancel")]),
+        footer(
+            app,
+            &[
+                (format!("Y / {}", key(app, Action::Select)), tr.f_confirm),
+                (format!("N / {}", key(app, Action::Close)), tr.f_cancel),
+            ],
+        ),
         Rect {
             x: inner.x,
             y: inner.y + inner.height.saturating_sub(2),
@@ -278,7 +387,8 @@ fn confirm(frame: &mut Frame<'_>, app: &mut App) {
 
 fn adapter_change(frame: &mut Frame<'_>, app: &mut App) {
     let t = app.theme.clone();
-    let inner = boxed(frame, app, Overlay::AdapterChange.title(), 64, 12);
+    let tr = app.tr();
+    let inner = boxed(frame, app, Overlay::AdapterChange.title(app.lang), 64, 12);
     let lines: Vec<Line<'static>> = app
         .adapters
         .iter()
@@ -305,7 +415,11 @@ fn adapter_change(frame: &mut Frame<'_>, app: &mut App) {
         app,
         footer(
             app,
-            &[("↑↓", "select"), ("Enter", "use adapter"), ("Esc", "close")],
+            &[
+                (nav_keys(app), tr.f_select),
+                (key(app, Action::Select), tr.f_use_adapter),
+                (key(app, Action::Close), tr.f_close),
+            ],
         ),
     );
 }
@@ -314,13 +428,14 @@ fn adapter_change(frame: &mut Frame<'_>, app: &mut App) {
 
 fn device_info(frame: &mut Frame<'_>, app: &mut App) {
     let t = app.theme.clone();
-    let inner = boxed(frame, app, Overlay::DeviceInfo.title(), 76, 28);
+    let tr = app.tr();
+    let inner = boxed(frame, app, Overlay::DeviceInfo.title(app.lang), 76, 28);
     let Some(d) = app.selected_device().cloned() else {
         return;
     };
     let row = |k: &str, v: String, color: ratatui::style::Color| {
         Line::from(vec![
-            Span::styled(format!("  {:<22}", k), Style::new().fg(t.muted)),
+            Span::styled(format!("  {}", util::pad(k, 22)), Style::new().fg(t.muted)),
             Span::styled(v, Style::new().fg(color)),
         ])
     };
@@ -339,55 +454,87 @@ fn device_info(frame: &mut Frame<'_>, app: &mut App) {
             "─".repeat(inner.width as usize),
             Style::new().fg(t.border),
         )),
-        row("Address", d.address.clone(), t.fg),
-        row("Adapter", d.adapter.clone(), t.muted),
-        row("Type", d.kind().label().into(), t.fg),
-        row("Icon", d.icon.clone(), t.muted),
+        row(tr.d_address, d.address.clone(), t.fg),
+        row(tr.d_adapter, d.adapter.clone(), t.muted),
+        row(tr.d_type, d.kind().label(app.lang).into(), t.fg),
+        row(tr.d_icon, d.icon.clone(), t.muted),
         row(
-            "Class",
+            tr.d_class,
             d.class
                 .map(|c| format!("0x{c:06X}"))
                 .unwrap_or_else(|| "—".into()),
             t.fg,
         ),
         row(
-            "Appearance",
+            tr.d_appearance,
             d.appearance
                 .map(|a| a.to_string())
                 .unwrap_or_else(|| "—".into()),
             t.fg,
         ),
-        row("Modalias", d.modalias.clone(), t.fg),
+        row(tr.d_modalias, d.modalias.clone(), t.fg),
         row(
-            "RSSI",
+            tr.d_rssi,
             d.rssi
                 .map(|r| format!("{r} dBm"))
                 .unwrap_or_else(|| "—".into()),
             signal_color(d.signal_bars(), &t),
         ),
         row(
-            "Tx power",
+            tr.d_txpower,
             d.tx_power
                 .map(|r| format!("{r} dBm"))
                 .unwrap_or_else(|| "—".into()),
             t.fg,
         ),
         row(
-            "Battery",
+            tr.d_battery,
             d.battery
                 .map(|p| format!("{p}%"))
                 .unwrap_or_else(|| "—".into()),
             t.success,
         ),
-        row("Paired", yesno(d.paired), t.paired),
-        row("Connected", yesno(d.connected), t.connected),
-        row("Trusted", yesno(d.trusted), t.trusted),
-        row("Blocked", yesno(d.blocked), t.blocked),
-        row("Legacy pairing", yesno(d.legacy_pairing), t.muted),
-        row("Services resolved", yesno(d.services_resolved), t.muted),
+        row(
+            tr.d_paired,
+            format!(
+                "{} {}",
+                if d.paired { "◆" } else { "◇" },
+                if d.paired { tr.yes } else { tr.no }
+            ),
+            t.paired,
+        ),
+        row(
+            tr.d_connected,
+            format!(
+                "{} {}",
+                if d.connected { "●" } else { "○" },
+                if d.connected { tr.yes } else { tr.no }
+            ),
+            t.connected,
+        ),
+        row(
+            tr.d_trusted,
+            format!(
+                "{} {}",
+                if d.trusted { "★" } else { "☆" },
+                if d.trusted { tr.yes } else { tr.no }
+            ),
+            t.trusted,
+        ),
+        row(
+            tr.d_blocked,
+            format!(
+                "{} {}",
+                if d.blocked { "⊘" } else { "·" },
+                if d.blocked { tr.yes } else { tr.no }
+            ),
+            t.blocked,
+        ),
+        row(tr.d_legacy, yesno(d.legacy_pairing, &tr), t.muted),
+        row(tr.d_resolved, yesno(d.services_resolved, &tr), t.muted),
         Line::raw(""),
         Line::from(Span::styled(
-            "  UUIDs / services",
+            format!("  {}", tr.d_uuids),
             Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
         )),
     ];
@@ -395,7 +542,10 @@ fn device_info(frame: &mut Frame<'_>, app: &mut App) {
         let short = if u.len() == 36 { &u[4..8] } else { u.as_str() };
         lines.push(Line::from(vec![
             Span::styled("   • ", Style::new().fg(t.accent_soft)),
-            Span::styled(util::pad(service_name(short), 24), Style::new().fg(t.muted)),
+            Span::styled(
+                util::pad(service_name(short, app.lang), 24),
+                Style::new().fg(t.muted),
+            ),
             Span::styled(u.clone(), Style::new().fg(t.dim)),
         ]));
     }
@@ -405,10 +555,11 @@ fn device_info(frame: &mut Frame<'_>, app: &mut App) {
         width: inner.width,
         height: inner.height.saturating_sub(2),
     };
+    let off = clamp_scroll(app, wrapped_lines(&lines, body.width), body.height);
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
-            .scroll((app.overlay_scroll as u16, 0)),
+            .scroll((off, 0)),
         body,
     );
     let fr = Rect {
@@ -417,14 +568,23 @@ fn device_info(frame: &mut Frame<'_>, app: &mut App) {
         width: inner.width,
         height: 2,
     };
-    frame.render_widget(footer(app, &[("↑↓", "scroll"), ("Esc", "close")]), fr);
+    frame.render_widget(
+        footer(
+            app,
+            &[
+                (nav_keys(app), tr.f_scroll),
+                (key(app, Action::Close), tr.f_close),
+            ],
+        ),
+        fr,
+    );
 }
 
-fn yesno(b: bool) -> String {
+fn yesno(b: bool, tr: &Tr) -> String {
     if b {
-        "yes".into()
+        tr.yes.into()
     } else {
-        "no".into()
+        tr.no.into()
     }
 }
 
@@ -441,7 +601,8 @@ fn signal_color(bars: u8, t: &Theme) -> ratatui::style::Color {
 
 fn file_picker(frame: &mut Frame<'_>, app: &mut App) {
     let t = app.theme.clone();
-    let inner = boxed(frame, app, Overlay::FilePicker.title(), 78, 26);
+    let tr = app.tr();
+    let inner = boxed(frame, app, Overlay::FilePicker.title(app.lang), 78, 26);
     let Some(fp) = app.file_picker.clone() else {
         return;
     };
@@ -512,7 +673,7 @@ fn file_picker(frame: &mut Frame<'_>, app: &mut App) {
             ),
             Span::styled(
                 if is_dir {
-                    "<DIR>".into()
+                    tr.fp_dir.into()
                 } else {
                     util::human_bytes(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
                 },
@@ -525,6 +686,7 @@ fn file_picker(frame: &mut Frame<'_>, app: &mut App) {
             Style::new()
         };
         frame.render_widget(Paragraph::new(line).style(style), r);
+        app.layout.overlay_items.push((r, idx));
     }
     let fr = Rect {
         x: inner.x,
@@ -536,12 +698,19 @@ fn file_picker(frame: &mut Frame<'_>, app: &mut App) {
         footer(
             app,
             &[
-                ("Space", "select"),
-                ("a", "invert"),
-                ("A", "all"),
-                ("←→", "dir"),
-                ("Ctrl+s", "send"),
-                ("Esc", "close"),
+                (key(app, Action::FileSelect), tr.f_select),
+                (key(app, Action::FileInvertSelection), tr.f_invert),
+                (key(app, Action::FileSelectAll), tr.f_all),
+                (
+                    format!(
+                        "{}{}",
+                        key(app, Action::FileDirBack),
+                        key(app, Action::FileDirForward)
+                    ),
+                    tr.f_dir,
+                ),
+                (key(app, Action::FileConfirmSelection), tr.f_send),
+                (key(app, Action::Close), tr.f_close),
             ],
         ),
         fr,
@@ -563,10 +732,11 @@ fn bar<'a>(ratio: f64, width: usize, t: &Theme) -> Vec<Span<'a>> {
 
 fn progress(frame: &mut Frame<'_>, app: &mut App) {
     let t = app.theme.clone();
-    let inner = boxed(frame, app, Overlay::Progress.title(), 96, 22);
+    let tr = app.tr();
+    let inner = boxed(frame, app, Overlay::Progress.title(app.lang), 96, 22);
     if app.transfers.is_empty() {
         frame.render_widget(
-            Paragraph::new("No transfers yet — use 'Send Files' on a device")
+            Paragraph::new(tr.pr_none)
                 .alignment(Alignment::Center)
                 .style(Style::new().fg(t.muted)),
             inner,
@@ -597,7 +767,7 @@ fn progress(frame: &mut Frame<'_>, app: &mut App) {
                 Style::new().fg(t.accent),
             ));
             v.push(Span::styled(
-                format!("{:<9}", tr.status.label()),
+                format!("{:<9}", tr.status.label(app.lang)),
                 Style::new().fg(match tr.status {
                     TransferStatus::Complete => t.success,
                     TransferStatus::Error | TransferStatus::Cancelled => t.error,
@@ -634,11 +804,11 @@ fn progress(frame: &mut Frame<'_>, app: &mut App) {
         footer(
             app,
             &[
-                ("↑↓", "select"),
-                ("z", "suspend"),
-                ("g", "resume"),
-                ("x", "cancel"),
-                ("Esc", "close"),
+                (nav_keys(app), tr.f_select),
+                (key(app, Action::TransferSuspend), tr.f_suspend),
+                (key(app, Action::TransferResume), tr.f_resume),
+                (key(app, Action::TransferCancel), tr.f_cancel),
+                (key(app, Action::Close), tr.f_close),
             ],
         ),
         fr,
@@ -661,10 +831,11 @@ fn centered_line(frame: &mut Frame<'_>, inner: Rect, line: Line<'static>, y: u16
 
 fn player(frame: &mut Frame<'_>, app: &mut App) {
     let t = app.theme.clone();
-    let inner = boxed(frame, app, Overlay::Player.title(), 64, 16);
+    let tr = app.tr();
+    let inner = boxed(frame, app, Overlay::Player.title(app.lang), 84, 16);
     let Some(p) = app.player.clone() else {
         frame.render_widget(
-            Paragraph::new("No media player is available")
+            Paragraph::new(tr.p_no_player)
                 .alignment(Alignment::Center)
                 .style(Style::new().fg(t.muted)),
             inner,
@@ -675,7 +846,7 @@ fn player(frame: &mut Frame<'_>, app: &mut App) {
         frame,
         inner,
         Line::from(Span::styled(
-            "♪  NOW PLAYING",
+            tr.p_now_playing,
             Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
         )),
         0,
@@ -705,7 +876,10 @@ fn player(frame: &mut Frame<'_>, app: &mut App) {
         frame,
         inner,
         Line::from(Span::styled(
-            format!("{}  ·  track {}/{}", p.genre, p.track_number, p.track_count),
+            format!(
+                "{}  ·  {} {}/{}",
+                p.genre, tr.p_track, p.track_number, p.track_count
+            ),
             Style::new().fg(t.dim),
         )),
         5,
@@ -753,8 +927,13 @@ fn player(frame: &mut Frame<'_>, app: &mut App) {
         inner,
         Line::from(Span::styled(
             format!(
-                "{}  ·  {}  ·  volume {}%  ·  eq {}",
-                p.status, p.device_name, p.volume, p.equalizer
+                "{}  ·  {}  ·  {} {}  ·  {} {}",
+                p.status.label(app.lang),
+                p.device_name,
+                tr.p_vol_prefix,
+                p.volume,
+                tr.p_eq,
+                p.equalizer
             ),
             Style::new().fg(t.dim),
         )),
@@ -766,19 +945,65 @@ fn player(frame: &mut Frame<'_>, app: &mut App) {
         width: inner.width,
         height: 2,
     };
+    // The footer area is two rows tall; use both so shuffle/repeat and close
+    // hints fit instead of being clipped off the right edge.
+    let row_a = Rect {
+        x: fr.x,
+        y: fr.y,
+        width: fr.width,
+        height: 1,
+    };
+    let row_b = Rect {
+        x: fr.x,
+        y: fr.y + 1,
+        width: fr.width,
+        height: 1,
+    };
     frame.render_widget(
         footer(
             app,
             &[
-                ("Space", "play/pause"),
-                ("< >", "track"),
-                ("←→", "seek"),
-                ("+ -", "volume"),
-                ("]", "stop"),
-                ("M", "hide"),
+                (key(app, Action::PlayerTogglePlay), tr.f_play_pause),
+                (
+                    format!(
+                        "{} {}",
+                        key(app, Action::PlayerPrevious),
+                        key(app, Action::PlayerNext)
+                    ),
+                    tr.f_track,
+                ),
+                (
+                    format!(
+                        "{}{}",
+                        key(app, Action::PlayerSeekBackward),
+                        key(app, Action::PlayerSeekForward)
+                    ),
+                    tr.f_seek,
+                ),
+                (
+                    format!(
+                        "{} {}",
+                        key(app, Action::PlayerVolumeUp),
+                        key(app, Action::PlayerVolumeDown)
+                    ),
+                    tr.f_volume,
+                ),
             ],
         ),
-        fr,
+        row_a,
+    );
+    frame.render_widget(
+        footer(
+            app,
+            &[
+                (key(app, Action::PlayerStop), tr.f_stop),
+                (key(app, Action::PlayerShuffle), tr.f_shuffle),
+                (key(app, Action::PlayerRepeat), tr.f_repeat),
+                (key(app, Action::PlayerHide), tr.f_hide),
+                (key(app, Action::Close), tr.f_close),
+            ],
+        ),
+        row_b,
     );
 }
 
@@ -786,7 +1011,8 @@ fn player(frame: &mut Frame<'_>, app: &mut App) {
 
 fn network(frame: &mut Frame<'_>, app: &mut App) {
     let t = app.theme.clone();
-    let inner = boxed(frame, app, Overlay::Network.title(), 74, 16);
+    let tr = app.tr();
+    let inner = boxed(frame, app, Overlay::Network.title(app.lang), 74, 16);
     let roles = [NetworkRole::Panu, NetworkRole::Nap, NetworkRole::Dun];
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (i, role) in roles.iter().enumerate() {
@@ -801,15 +1027,15 @@ fn network(frame: &mut Frame<'_>, app: &mut App) {
                 Style::new().fg(t.accent),
             ),
             Span::styled(
-                util::pad(role.label(), 22),
+                util::pad(role.label_for(app.lang), 22),
                 Style::new().fg(t.fg).add_modifier(Modifier::BOLD),
             ),
             Span::styled(util::pad(role.uuid(), 8), Style::new().fg(t.dim)),
             Span::styled(
                 if active {
-                    "● connected"
+                    format!("● {}", tr.lg_connected)
                 } else {
-                    "○ available"
+                    format!("○ {}", tr.n_available)
                 },
                 Style::new().fg(if active { t.success } else { t.dim }),
             ),
@@ -817,20 +1043,26 @@ fn network(frame: &mut Frame<'_>, app: &mut App) {
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
-        "  Active connections",
+        format!("  {}", tr.n_active),
         Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
     )));
     if app.networks.is_empty() {
         lines.push(Line::from(Span::styled(
-            "   (none)",
+            format!("   {}", tr.n_none),
             Style::new().fg(t.dim),
         )));
     }
-    for n in &app.networks {
+    // Only live connections belong in the "active connections" list. A
+    // disconnected Network record is kept by the backend as history, but
+    // showing it here would read as still connected.
+    for n in app.networks.iter().filter(|n| n.connected) {
         lines.push(Line::from(vec![
             Span::styled("   • ", Style::new().fg(t.accent_soft)),
             Span::styled(util::pad(&n.device_name, 20), Style::new().fg(t.fg)),
-            Span::styled(util::pad(n.role.label(), 22), Style::new().fg(t.muted)),
+            Span::styled(
+                util::pad(n.role.label_for(app.lang), 22),
+                Style::new().fg(t.muted),
+            ),
             Span::styled(n.interface.clone(), Style::new().fg(t.info)),
         ]));
     }
@@ -841,6 +1073,11 @@ fn network(frame: &mut Frame<'_>, app: &mut App) {
         height: inner.height.saturating_sub(2),
     };
     list(frame, body, lines, app.overlay_index, app, Line::raw(""));
+    // Only the three role rows are selectable; the header/connection lines
+    // below them must not become mouse targets with a bogus index.
+    app.layout
+        .overlay_items
+        .retain(|(_, idx)| *idx < roles.len());
     let fr = Rect {
         x: inner.x,
         y: inner.y + inner.height.saturating_sub(2),
@@ -851,10 +1088,17 @@ fn network(frame: &mut Frame<'_>, app: &mut App) {
         footer(
             app,
             &[
-                ("↑↓", "select role"),
-                ("Enter / c", "connect"),
-                ("d", "disconnect"),
-                ("Esc", "close"),
+                (nav_keys(app), tr.f_select_role),
+                (
+                    format!(
+                        "{} / {}",
+                        key(app, Action::Select),
+                        key(app, Action::Connect)
+                    ),
+                    tr.f_connect,
+                ),
+                (key(app, Action::Remove), tr.f_disconnect),
+                (key(app, Action::Close), tr.f_close),
             ],
         ),
         fr,
@@ -865,10 +1109,11 @@ fn network(frame: &mut Frame<'_>, app: &mut App) {
 
 fn profiles(frame: &mut Frame<'_>, app: &mut App) {
     let t = app.theme.clone();
-    let inner = boxed(frame, app, Overlay::Profiles.title(), 72, 16);
+    let tr = app.tr();
+    let inner = boxed(frame, app, Overlay::Profiles.title(app.lang), 72, 16);
     let lines: Vec<Line<'static>> = if app.profiles.is_empty() {
         vec![Line::from(Span::styled(
-            "  No audio profiles advertised by this device",
+            tr.pf_none,
             Style::new().fg(t.muted),
         ))]
     } else {
@@ -884,7 +1129,10 @@ fn profiles(frame: &mut Frame<'_>, app: &mut App) {
                         util::pad(&p.name, 18),
                         Style::new().fg(t.fg).add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(util::pad(&p.description, 32), Style::new().fg(t.muted)),
+                    Span::styled(
+                        util::pad(profile_desc(&p.name, app.lang), 32),
+                        Style::new().fg(t.muted),
+                    ),
                     Span::styled(p.device.clone(), Style::new().fg(t.dim)),
                 ])
             })
@@ -906,7 +1154,18 @@ fn profiles(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(
         footer(
             app,
-            &[("↑↓", "select"), ("Enter", "toggle"), ("Esc", "close")],
+            &[
+                (nav_keys(app), tr.f_select),
+                (
+                    key(app, Action::Select),
+                    if app.audio_profiles_writable() {
+                        tr.f_toggle
+                    } else {
+                        tr.f_readonly
+                    },
+                ),
+                (key(app, Action::Close), tr.f_close),
+            ],
         ),
         fr,
     );
@@ -916,33 +1175,23 @@ fn profiles(frame: &mut Frame<'_>, app: &mut App) {
 
 fn auth(frame: &mut Frame<'_>, app: &mut App) {
     let t = app.theme.clone();
-    let inner = boxed(frame, app, Overlay::Auth.title(), 60, 11);
+    let tr = app.tr();
+    let inner = boxed(frame, app, Overlay::Auth.title(app.lang), 60, 11);
     let Some(req) = app.auth.clone() else { return };
     let (heading, detail) = match &req.kind {
         AuthKind::Confirmation(passkey) => (
-            "Confirm pairing".to_string(),
-            format!("Verify the code {passkey:06} on both devices"),
+            tr.au_confirm.to_string(),
+            fill(tr.au_verify, format!("{passkey:06}")),
         ),
-        AuthKind::Authorization => (
-            "Authorize connection".into(),
-            "Allow this device to connect?".into(),
-        ),
-        AuthKind::PinCode => (
-            "Enter PIN code".into(),
-            "Type the PIN shown on the device".into(),
-        ),
-        AuthKind::Passkey(k) => (
-            "Enter passkey".into(),
-            format!("Expected up to 6 digits (shown: {k})"),
-        ),
-        AuthKind::DisplayPinCode(pin) => (
-            "Pairing PIN".into(),
-            format!("Enter this PIN on the device: {pin}"),
-        ),
+        AuthKind::Authorization => (tr.au_authorize.into(), tr.au_allow.into()),
+        AuthKind::PinCode => (tr.au_pin.into(), tr.au_type.into()),
+        AuthKind::Passkey(k) => (tr.au_passkey.into(), fill(tr.au_expected, k)),
+        AuthKind::DisplayPinCode(pin) => (tr.au_pairing_pin.into(), fill(tr.au_enter, pin)),
         AuthKind::DisplayPasskey(k) => (
-            "Pairing passkey".into(),
-            format!("Enter {k:06} on the device"),
+            tr.au_pairing_pin.into(),
+            fill(tr.au_enter_passkey, format!("{k:06}")),
         ),
+        AuthKind::FilePush(name) => (tr.au_file_push.to_string(), fill(tr.au_file_accept, name)),
     };
     let lines = vec![
         Line::from(Span::styled(
@@ -979,7 +1228,13 @@ fn auth(frame: &mut Frame<'_>, app: &mut App) {
         height: 2,
     };
     frame.render_widget(
-        footer(app, &[("Enter", "accept / submit"), ("Esc", "reject")]),
+        footer(
+            app,
+            &[
+                (key(app, Action::Select), tr.f_accept),
+                (key(app, Action::Close), tr.f_reject),
+            ],
+        ),
         fr,
     );
 }
@@ -988,7 +1243,8 @@ fn auth(frame: &mut Frame<'_>, app: &mut App) {
 
 fn theme_picker(frame: &mut Frame<'_>, app: &mut App) {
     let t = app.theme.clone();
-    let inner = boxed(frame, app, Overlay::ThemePicker.title(), 48, 15);
+    let tr = app.tr();
+    let inner = boxed(frame, app, Overlay::ThemePicker.title(app.lang), 48, 15);
     let themes = Theme::catalogue();
     let lines: Vec<Line<'static>> = themes
         .iter()
@@ -1029,7 +1285,11 @@ fn theme_picker(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(
         footer(
             app,
-            &[("↑↓", "select"), ("Enter", "apply"), ("Esc", "close")],
+            &[
+                (nav_keys(app), tr.f_select),
+                (key(app, Action::Select), tr.f_apply),
+                (key(app, Action::Close), tr.f_close),
+            ],
         ),
         fr,
     );
@@ -1039,7 +1299,8 @@ fn theme_picker(frame: &mut Frame<'_>, app: &mut App) {
 
 fn log_view(frame: &mut Frame<'_>, app: &mut App) {
     let t = app.theme.clone();
-    let inner = boxed(frame, app, Overlay::Log.title(), 84, 24);
+    let tr = app.tr();
+    let inner = boxed(frame, app, Overlay::Log.title(app.lang), 84, 24);
     let lines: Vec<Line<'static>> = app
         .log
         .iter()
@@ -1065,10 +1326,11 @@ fn log_view(frame: &mut Frame<'_>, app: &mut App) {
         width: inner.width,
         height: inner.height.saturating_sub(2),
     };
+    let off = clamp_scroll(app, wrapped_lines(&lines, body.width), body.height);
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
-            .scroll((app.overlay_scroll as u16, 0)),
+            .scroll((off, 0)),
         body,
     );
     let fr = Rect {
@@ -1077,14 +1339,34 @@ fn log_view(frame: &mut Frame<'_>, app: &mut App) {
         width: inner.width,
         height: 2,
     };
-    frame.render_widget(footer(app, &[("↑↓", "scroll"), ("Esc", "close")]), fr);
+    frame.render_widget(
+        footer(
+            app,
+            &[
+                (nav_keys(app), tr.f_scroll),
+                (key(app, Action::Close), tr.f_close),
+            ],
+        ),
+        fr,
+    );
 }
 
 // ---------------------------------------------------------------------------
 
 fn command_palette(frame: &mut Frame<'_>, app: &mut App) {
     let t = app.theme.clone();
-    let inner = boxed(frame, app, Overlay::CommandPalette.title(), 62, 22);
+    let tr = app.tr();
+    let stage0 = app.palette_stage == 0;
+    let title = if stage0 {
+        tr.command_palette.to_string()
+    } else {
+        let cat = app
+            .palette_category
+            .map(|c| c.label_for(app.lang))
+            .unwrap_or("");
+        format!("{} · {}", tr.command_palette, cat)
+    };
+    let inner = boxed(frame, app, &title, 62, 22);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("  ❯ ", Style::new().fg(t.accent)),
@@ -1107,20 +1389,40 @@ fn command_palette(frame: &mut Frame<'_>, app: &mut App) {
         width: inner.width,
         height: inner.height.saturating_sub(3),
     };
-    let lines: Vec<Line<'static>> = app
-        .palette_items
-        .iter()
-        .map(|a| {
-            Line::from(vec![
-                Span::styled(format!("   {:<30}", a.name()), Style::new().fg(t.fg)),
-                Span::styled(app.keys.label(*a), Style::new().fg(t.accent)),
-                Span::styled(
-                    format!("   {}", a.context().label()),
-                    Style::new().fg(t.dim),
-                ),
-            ])
-        })
-        .collect();
+    let lines: Vec<Line<'static>> = if stage0 {
+        // Level 1: categories with how many commands each contains.
+        app.palette_categories
+            .iter()
+            .map(|c| {
+                let count = Action::all()
+                    .into_iter()
+                    .filter(|a| a.context() == *c)
+                    .count();
+                Line::from(vec![
+                    Span::styled(
+                        format!("   {}", util::pad(c.label_for(app.lang), 26)),
+                        Style::new().fg(t.fg).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("{count:>3}  "), Style::new().fg(t.muted)),
+                    Span::styled("▸", Style::new().fg(t.dim)),
+                ])
+            })
+            .collect()
+    } else {
+        // Level 2: the actions in the selected category.
+        app.palette_items
+            .iter()
+            .map(|a| {
+                Line::from(vec![
+                    Span::styled(
+                        format!("   {}", util::pad(a.name_for(app.lang), 30)),
+                        Style::new().fg(t.fg),
+                    ),
+                    Span::styled(app.keys.label(*a), Style::new().fg(t.accent)),
+                ])
+            })
+            .collect()
+    };
     list(frame, body, lines, app.overlay_index, app, Line::raw(""));
     let fr = Rect {
         x: inner.x,
@@ -1128,26 +1430,37 @@ fn command_palette(frame: &mut Frame<'_>, app: &mut App) {
         width: inner.width,
         height: 2,
     };
-    frame.render_widget(
-        footer(
-            app,
-            &[
-                ("type", "filter"),
-                ("↑↓", "select"),
-                ("Enter", "run"),
-                ("Esc", "close"),
-            ],
-        ),
-        fr,
-    );
+    let hints: Vec<(String, &'static str)> = if stage0 {
+        vec![
+            (nav_keys(app), tr.f_select),
+            (key(app, Action::Select), tr.f_open),
+            (key(app, Action::Close), tr.f_close),
+        ]
+    } else {
+        vec![
+            (tr.f_type.into(), tr.f_filter),
+            (nav_keys(app), tr.f_select),
+            (key(app, Action::Select), tr.f_run),
+            (key(app, Action::Close), tr.f_back),
+        ]
+    };
+    frame.render_widget(footer(app, &hints), fr);
 }
 
 // ---------------------------------------------------------------------------
 
 fn about(frame: &mut Frame<'_>, app: &mut App) {
     let t = app.theme.clone();
-    let inner = boxed(frame, app, Overlay::About.title(), 62, 18);
+    let tr = app.tr();
+    let inner = boxed(frame, app, Overlay::About.title(app.lang), 62, 19);
     let features = app.features;
+    // Align the value column by display width so CJK and Latin labels line up.
+    let kv = |k: &str, v: String| {
+        Line::from(vec![
+            Span::styled(format!("   {}", util::pad(k, 10)), Style::new().fg(t.muted)),
+            Span::styled(v, Style::new().fg(t.muted)),
+        ])
+    };
     let lines = vec![
         Line::from(vec![
             Span::styled("  ◆ ", Style::new().fg(t.accent)),
@@ -1162,47 +1475,58 @@ fn about(frame: &mut Frame<'_>, app: &mut App) {
         ]),
         Line::raw(""),
         Line::from(Span::styled(
-            "  A full-featured Bluetooth manager for the terminal.",
+            format!("  {}", tr.ab_desc),
             Style::new().fg(t.fg),
         )),
         Line::from(Span::styled(
-            "  Written in Rust with ratatui; BlueZ over D-Bus.",
+            format!("  {}", tr.ab_desc2),
             Style::new().fg(t.muted),
         )),
         Line::raw(""),
         Line::from(Span::styled(
-            "  Session",
+            format!("  {}", tr.ab_session),
             Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(
-            format!("   backend      {}", app.backend.label()),
-            Style::new().fg(t.muted),
-        )),
-        Line::from(Span::styled(
-            format!("   adapters     {}", app.adapters.len()),
-            Style::new().fg(t.muted),
-        )),
-        Line::from(Span::styled(
-            format!("   devices      {}", app.devices.len()),
-            Style::new().fg(t.muted),
-        )),
-        Line::from(Span::styled(
-            format!("   theme        {}", app.config.theme),
-            Style::new().fg(t.muted),
-        )),
-        Line::from(Span::styled(
-            format!("   OBEX         {}", yesno(features.obex)),
-            Style::new().fg(t.muted),
-        )),
-        Line::from(Span::styled(
-            format!("   media        {}", yesno(features.media_player)),
-            Style::new().fg(t.muted),
-        )),
+        kv(tr.ab_backend, app.backend.label().to_string()),
+        kv(tr.ab_adapters, app.adapters.len().to_string()),
+        kv(tr.ab_devices, app.devices.len().to_string()),
+        kv(tr.ab_theme, app.config.theme.clone()),
+        kv(tr.ab_obex, yesno(features.obex, &tr)),
+        kv(tr.ab_receive, yesno(features.receive_file, &tr)),
+        kv(tr.ab_media, yesno(features.media_player, &tr)),
         Line::raw(""),
         Line::from(Span::styled(
-            "  Apache-2.0 licensed · inspired by bluetuith",
+            format!("  {}", tr.ab_license),
             Style::new().fg(t.dim),
         )),
     ];
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+    let body = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: inner.height.saturating_sub(2),
+    };
+    let off = clamp_scroll(app, wrapped_lines(&lines, body.width), body.height);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .scroll((off, 0)),
+        body,
+    );
+    let fr = Rect {
+        x: inner.x,
+        y: inner.y + inner.height.saturating_sub(2),
+        width: inner.width,
+        height: 2,
+    };
+    frame.render_widget(
+        footer(
+            app,
+            &[
+                (nav_keys(app), tr.f_scroll),
+                (key(app, Action::Close), tr.f_close),
+            ],
+        ),
+        fr,
+    );
 }

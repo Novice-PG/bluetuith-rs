@@ -55,6 +55,9 @@ pub struct Config {
     pub scan_on_start: bool,
     /// Run against the built-in simulated adapter instead of BlueZ.
     pub demo: bool,
+    /// UI language: `en` or `zh` (also auto-detected from `$LANG`).
+    #[serde(rename = "language")]
+    pub language: String,
     /// Override any named action, e.g. `Quit = "q"`.
     pub keybindings: HashMap<String, String>,
 }
@@ -78,6 +81,7 @@ impl Default for Config {
             show_hidden_files: false,
             scan_on_start: false,
             demo: false,
+            language: crate::i18n::Lang::detect().code().to_string(),
             keybindings: HashMap::new(),
         }
     }

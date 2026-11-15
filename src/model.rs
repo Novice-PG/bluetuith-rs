@@ -206,22 +206,36 @@ impl DeviceKind {
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Headphones => "Headphones",
-            Self::Headset => "Headset",
-            Self::Speaker => "Speaker",
-            Self::AudioCard => "Audio",
-            Self::Keyboard => "Keyboard",
-            Self::Mouse => "Mouse",
-            Self::Phone => "Phone",
-            Self::Computer => "Computer",
-            Self::Watch => "Watch",
-            Self::Gamepad => "Gamepad",
-            Self::Printer => "Printer",
-            Self::Camera => "Camera",
-            Self::Network => "Network",
-            Self::Unknown => "Device",
+    pub fn label(self, lang: crate::i18n::Lang) -> &'static str {
+        match (self, lang) {
+            (Self::Headphones, crate::i18n::Lang::Zh) => "头戴耳机",
+            (Self::Headset, crate::i18n::Lang::Zh) => "耳机",
+            (Self::Speaker, crate::i18n::Lang::Zh) => "音箱",
+            (Self::AudioCard, crate::i18n::Lang::Zh) => "声卡",
+            (Self::Keyboard, crate::i18n::Lang::Zh) => "键盘",
+            (Self::Mouse, crate::i18n::Lang::Zh) => "鼠标",
+            (Self::Phone, crate::i18n::Lang::Zh) => "手机",
+            (Self::Computer, crate::i18n::Lang::Zh) => "电脑",
+            (Self::Watch, crate::i18n::Lang::Zh) => "手表",
+            (Self::Gamepad, crate::i18n::Lang::Zh) => "手柄",
+            (Self::Printer, crate::i18n::Lang::Zh) => "打印机",
+            (Self::Camera, crate::i18n::Lang::Zh) => "相机",
+            (Self::Network, crate::i18n::Lang::Zh) => "网络",
+            (Self::Unknown, crate::i18n::Lang::Zh) => "设备",
+            (Self::Headphones, _) => "Headphones",
+            (Self::Headset, _) => "Headset",
+            (Self::Speaker, _) => "Speaker",
+            (Self::AudioCard, _) => "Audio",
+            (Self::Keyboard, _) => "Keyboard",
+            (Self::Mouse, _) => "Mouse",
+            (Self::Phone, _) => "Phone",
+            (Self::Computer, _) => "Computer",
+            (Self::Watch, _) => "Watch",
+            (Self::Gamepad, _) => "Gamepad",
+            (Self::Printer, _) => "Printer",
+            (Self::Camera, _) => "Camera",
+            (Self::Network, _) => "Network",
+            (Self::Unknown, _) => "Device",
         }
     }
 }
@@ -248,6 +262,20 @@ impl fmt::Display for PlayStatus {
             Self::Error => "Error",
         };
         f.write_str(s)
+    }
+}
+
+impl PlayStatus {
+    pub fn label(self, lang: crate::i18n::Lang) -> &'static str {
+        let tr = lang.tr();
+        match self {
+            Self::Stopped => tr.p_stopped,
+            Self::Playing => tr.p_playing,
+            Self::Paused => tr.p_paused,
+            Self::ForwardSeek => tr.p_seeking_fwd,
+            Self::ReverseSeek => tr.p_seeking_rev,
+            Self::Error => tr.p_error,
+        }
     }
 }
 
@@ -313,6 +341,8 @@ pub enum PlayerCommand {
     Rewind,
     VolumeUp,
     VolumeDown,
+    ToggleShuffle,
+    CycleRepeat,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -333,13 +363,14 @@ pub enum TransferStatus {
 }
 
 impl TransferStatus {
-    pub fn label(self) -> &'static str {
+    pub fn label(self, lang: crate::i18n::Lang) -> &'static str {
+        let tr = lang.tr();
         match self {
-            Self::Active => "Active",
-            Self::Suspended => "Suspended",
-            Self::Complete => "Done",
-            Self::Error => "Failed",
-            Self::Cancelled => "Cancelled",
+            Self::Active => tr.ts_active,
+            Self::Suspended => tr.ts_suspended,
+            Self::Complete => tr.ts_done,
+            Self::Error => tr.ts_failed,
+            Self::Cancelled => tr.ts_cancelled,
         }
     }
 }
@@ -384,6 +415,16 @@ impl NetworkRole {
             Self::Dun => "DUN (dial-up)",
         }
     }
+    /// Localised label for UI rendering (the plain `label()` stays English
+    /// for backend status strings).
+    pub fn label_for(self, lang: crate::i18n::Lang) -> &'static str {
+        let tr = lang.tr();
+        match self {
+            Self::Panu => tr.nr_panu,
+            Self::Nap => tr.nr_nap,
+            Self::Dun => tr.nr_dun,
+        }
+    }
     pub fn uuid(self) -> &'static str {
         match self {
             Self::Panu => "1115",
@@ -422,6 +463,8 @@ pub enum AuthKind {
     Authorization,
     DisplayPinCode(String),
     DisplayPasskey(u32),
+    /// An incoming OBEX Object Push; the payload is the suggested filename.
+    FilePush(String),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -494,6 +537,20 @@ pub enum SortKey {
     Battery,
     State,
     Kind,
+}
+
+impl SortKey {
+    pub fn label(self, lang: crate::i18n::Lang) -> &'static str {
+        let tr = lang.tr();
+        match self {
+            SortKey::Name => tr.sort_name,
+            SortKey::Address => tr.sort_address,
+            SortKey::Rssi => tr.sort_rssi,
+            SortKey::Battery => tr.sort_battery,
+            SortKey::State => tr.sort_state,
+            SortKey::Kind => tr.sort_kind,
+        }
+    }
 }
 
 #[cfg(test)]

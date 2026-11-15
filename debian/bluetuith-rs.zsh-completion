@@ -18,6 +18,7 @@ _arguments -s \
   '--theme[palette]:theme:(Midnight Nord Catppuccin Dracula Gruvbox "Tokyo Night" "Rosé Pine" Solarized Daylight)' \
   '--accent[accent colour]:hex:' \
   '--default-sort[sort]:key:(Name Address Rssi Battery State Kind)' \
+  '(- --lang --language)'{--lang,--language}'[language]:lang:(en zh)' \
   '--config[config file]:file:_files' \
   '--demo[simulated adapter]' \
   '(-h --help)'{-h,--help}'[help]' \

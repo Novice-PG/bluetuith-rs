@@ -14,9 +14,11 @@ Suggests: bluez, bluez-obexd
 Description: full-featured Bluetooth manager for the terminal (ratatui)
  bluetuith-rs is a terminal user interface for managing Bluetooth adapters
  and devices over BlueZ D-Bus. It provides adapter power/discovery control,
- device pairing and connection, OBEX Object Push file transfers with progress,
- AVRCP media playback, PAN networking, audio profiles and a pairing agent.
+ device pairing and connection, OBEX Object Push file send and receive (with
+ an authorization dialog and a configurable receive directory), AVRCP media
+ playback including shuffle/repeat, PAN networking, audio profiles and a
+ pairing agent.
  .
  The interface is built with ratatui and supports mouse input, configurable
- keybindings, nine colour themes, search/filter and a --demo mode that runs
- without Bluetooth hardware.
+ keybindings, nine colour themes, search/filter, an English/Chinese bilingual
+ UI and a --demo mode that runs without Bluetooth hardware.

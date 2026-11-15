@@ -64,8 +64,8 @@ pub fn modal(frame: &mut Frame<'_>, area: Rect, title: &str, app: &App) -> Rect 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
     if area.width < 40 || area.height < 12 {
-        let p = Paragraph::new("Terminal too small — please resize to at least 40×12")
-            .style(Style::new().fg(app.theme.warning));
+        let p =
+            Paragraph::new(app.tr().msg_terminal_small).style(Style::new().fg(app.theme.warning));
         frame.render_widget(p, area);
         return;
     }
@@ -86,6 +86,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         Constraint::Length(player_h),
         Constraint::Length(1),
         Constraint::Length(help_h),
+        // Bottom breathing room: lift the status/help bars off the terminal's
+        // last row instead of leaving side gaps. This row is just background.
+        Constraint::Length(1),
     ])
     .split(area);
 

@@ -521,6 +521,7 @@ impl DemoBackend {
             }
             SendFiles { device, files } => {
                 let name = self.dev_name(&device);
+                let count = files.len();
                 for f in files {
                     self.next_id += 1;
                     let size = std::fs::metadata(&f)
@@ -542,10 +543,8 @@ impl DemoBackend {
                         started_at: self.tick,
                     });
                 }
-                self.events.push_back(success(format!(
-                    "Sending {} file(s) to {name}",
-                    self.transfers.len()
-                )));
+                self.events
+                    .push_back(success(format!("Sending {count} file(s) to {name}")));
                 self.events
                     .push_back(Event::Transfers(self.transfers.clone()));
             }
@@ -600,6 +599,15 @@ impl DemoBackend {
                         Cmd::Rewind => p.position_ms = p.position_ms.saturating_sub(10_000),
                         Cmd::VolumeUp => p.volume = (p.volume + 5).min(100),
                         Cmd::VolumeDown => p.volume = p.volume.saturating_sub(5),
+                        Cmd::ToggleShuffle => p.shuffle = !p.shuffle,
+                        Cmd::CycleRepeat => {
+                            p.repeat = match p.repeat {
+                                RepeatMode::Off => RepeatMode::Single,
+                                RepeatMode::Single => RepeatMode::All,
+                                RepeatMode::All => RepeatMode::Group,
+                                RepeatMode::Group => RepeatMode::Off,
+                            }
+                        }
                     }
                 }
                 self.events.push_back(Event::Player(self.player.clone()));
@@ -682,11 +690,13 @@ impl DemoBackend {
                 let _ = addr;
                 self.events
                     .push_back(Event::Networks(self.networks.clone()));
+                self.events.push_back(info("Network list refreshed"));
             }
             RefreshProfiles(addr) => {
                 let _ = addr;
                 self.events
                     .push_back(Event::Profiles(self.profiles.clone()));
+                self.events.push_back(info("Audio profiles refreshed"));
             }
         }
     }
@@ -756,9 +766,6 @@ impl Backend for DemoBackend {
         self.events.drain(..).collect()
     }
 
-    fn features(&self) -> FeatureSet {
-        self.features
-    }
     fn label(&self) -> &'static str {
         "demo"
     }

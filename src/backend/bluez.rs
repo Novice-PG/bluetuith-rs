@@ -11,13 +11,14 @@
 //! a few times a second anyway, and a full snapshot is both simpler and more
 //! robust against BlueZ's many optional interfaces.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_channel::Sender as AsyncSender;
 use zbus::blocking::Connection;
 use zbus::fdo;
@@ -34,6 +35,7 @@ type ManagedObjects =
     HashMap<OwnedObjectPath, HashMap<OwnedInterfaceName, HashMap<String, OwnedValue>>>;
 
 const AGENT_PATH: &str = "/org/bluez/agent/bluetuith_rs";
+const OBEX_AGENT_PATH: &str = "/org/bluez/obex/agent/bluetuith_rs";
 
 // ---------------------------------------------------------------------------
 // Value helpers. BlueZ is inconsistent about integer widths across versions,
@@ -55,63 +57,36 @@ fn as_bool(props: &HashMap<String, OwnedValue>, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn as_i16(props: &HashMap<String, OwnedValue>, key: &str) -> Option<i16> {
-    let v = get(props, key)?;
-    if let Ok(n) = v.downcast_ref::<i16>() {
-        return Some(n);
-    }
-    if let Ok(n) = v.downcast_ref::<i32>() {
-        return Some(n as i16);
-    }
-    if let Ok(n) = v.downcast_ref::<u8>() {
-        return Some(n as i16);
-    }
-    None
+/// BlueZ, obexd and the various vendor forks disagree on the integer width
+/// used for the same property (`RSSI` int16 vs int32, `Size` uint64 vs uint32,
+/// `Volume` uint16 vs byte, …). Accept every D-Bus integer width and clamp to
+/// the requested Rust type, instead of silently dropping the value.
+macro_rules! num_getter {
+    ($name:ident, $out:ty) => {
+        fn $name(props: &HashMap<String, OwnedValue>, key: &str) -> Option<$out> {
+            let v = get(props, key)?;
+            let candidates = [
+                v.downcast_ref::<u8>().ok().map(|x| x as i128),
+                v.downcast_ref::<u16>().ok().map(|x| x as i128),
+                v.downcast_ref::<u32>().ok().map(|x| x as i128),
+                v.downcast_ref::<u64>().ok().map(|x| x as i128),
+                v.downcast_ref::<i16>().ok().map(|x| x as i128),
+                v.downcast_ref::<i32>().ok().map(|x| x as i128),
+                v.downcast_ref::<i64>().ok().map(|x| x as i128),
+            ];
+            candidates
+                .into_iter()
+                .flatten()
+                .find_map(|x| <$out>::try_from(x).ok())
+        }
+    };
 }
 
-fn as_u8(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u8> {
-    let v = get(props, key)?;
-    if let Ok(n) = v.downcast_ref::<u8>() {
-        return Some(n);
-    }
-    if let Ok(n) = v.downcast_ref::<i32>() {
-        return Some(n as u8);
-    }
-    None
-}
-
-fn as_u16(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u16> {
-    let v = get(props, key)?;
-    if let Ok(n) = v.downcast_ref::<u16>() {
-        return Some(n);
-    }
-    if let Ok(n) = v.downcast_ref::<u32>() {
-        return Some(n as u16);
-    }
-    None
-}
-
-fn as_u32(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u32> {
-    let v = get(props, key)?;
-    if let Ok(n) = v.downcast_ref::<u32>() {
-        return Some(n);
-    }
-    if let Ok(n) = v.downcast_ref::<u64>() {
-        return Some(n as u32);
-    }
-    None
-}
-
-fn as_u64(props: &HashMap<String, OwnedValue>, key: &str) -> Option<u64> {
-    let v = get(props, key)?;
-    if let Ok(n) = v.downcast_ref::<u64>() {
-        return Some(n);
-    }
-    if let Ok(n) = v.downcast_ref::<u32>() {
-        return Some(n as u64);
-    }
-    None
-}
+num_getter!(as_i16, i16);
+num_getter!(as_u8, u8);
+num_getter!(as_u16, u16);
+num_getter!(as_u32, u32);
+num_getter!(as_u64, u64);
 
 fn as_strings(props: &HashMap<String, OwnedValue>, key: &str) -> Vec<String> {
     let Some(v) = get(props, key) else {
@@ -219,7 +194,6 @@ impl Agent {
 pub struct BluezBackend {
     cmd_tx: Sender<Command>,
     event_rx: Receiver<Event>,
-    features: FeatureSet,
 }
 
 struct ThreadState {
@@ -227,6 +201,20 @@ struct ThreadState {
     pending_auth: HashMap<usize, async_channel::Sender<AuthResponse>>,
     obex_seen: bool,
     last_transfer_count: usize,
+    /// Connection that owns `org.bluez.obex`. BlueZ's `obexd` is normally a
+    /// *session*-bus service, but some setups run it on the system bus.
+    obex_conn: Option<Connection>,
+    /// OBEX transfer id -> object path, so Suspend/Resume/Cancel can reach it.
+    transfer_paths: HashMap<usize, String>,
+    /// Active network id -> (device address, role), so Disconnect can reach it.
+    network_devices: HashMap<usize, (String, NetworkRole)>,
+    /// "address|uuid" pairs the user disconnected this session. BlueZ does not
+    /// expose BNEP connection objects, so the network list is synthesised from
+    /// connected devices; without this set a disconnect would reappear on the
+    /// very next poll.
+    disconnected_networks: HashSet<String>,
+    /// Whether the OBEX Object Push Agent has been registered on obexd.
+    obex_agent_registered: bool,
 }
 
 impl BluezBackend {
@@ -239,11 +227,7 @@ impl BluezBackend {
             .name("bluez".into())
             .spawn(move || run(cmd_rx, event_tx, agent_rx, agent_tx, cfg))?;
 
-        Ok(Self {
-            cmd_tx,
-            event_rx,
-            features: FeatureSet::all(),
-        })
+        Ok(Self { cmd_tx, event_rx })
     }
 }
 
@@ -260,9 +244,6 @@ impl Backend for BluezBackend {
         out
     }
 
-    fn features(&self) -> FeatureSet {
-        self.features
-    }
     fn label(&self) -> &'static str {
         "BlueZ"
     }
@@ -307,18 +288,47 @@ fn run(
         }
     }
 
-    let _ = event_tx.send(Event::Features(FeatureSet::all()));
+    // Probe for obexd on the session bus first (D-Bus activation starts it),
+    // then the system bus. Report accurate OBEX capabilities to the UI so it
+    // never offers "send file" when the service cannot work.
     let mut state = ThreadState {
         selected_adapter: String::new(),
         pending_auth: HashMap::new(),
         obex_seen: false,
         last_transfer_count: 0,
+        obex_conn: None,
+        transfer_paths: HashMap::new(),
+        network_devices: HashMap::new(),
+        disconnected_networks: HashSet::new(),
+        obex_agent_registered: false,
     };
+    if cfg.disable_obex_services {
+        // Honour the flag in the backend too: do not probe obexd, do not
+        // register a receive Agent, do not accept incoming pushes.
+        let mut f = FeatureSet::all();
+        f.obex = false;
+        f.send_file = false;
+        f.receive_file = false;
+        let _ = event_tx.send(Event::Features(f));
+    } else {
+        let _ = event_tx.send(Event::Features(obex_features(&mut state)));
+        if let Err(e) = register_obex_agent(&mut state, &agent_tx, &cfg) {
+            let _ = event_tx.send(warn(format!("OBEX receive agent unavailable: {e}")));
+        }
+    }
 
+    let mut ticks: u64 = 0;
+    // Publish the first snapshot right away. The loop below waits up to 1.2s
+    // in recv_timeout before its first refresh, which would otherwise leave
+    // the UI showing "0 devices" for over a second on every startup.
+    refresh(&conn, &event_tx, &mut state, &cfg);
     loop {
-        // Pairing prompts raised by the agent.
+        // Pairing prompts (device agent) and incoming-file prompts (OBEX
+        // agent) share the same channel and the same UI dialog.
         while let Ok((mut req, responder)) = agent_rx.try_recv() {
-            req.device_name = name_of(&conn, &req.device);
+            if !matches!(req.kind, AuthKind::FilePush(_)) {
+                req.device_name = name_of(&conn, &req.device);
+            }
             state.pending_auth.insert(req.id, responder);
             let _ = event_tx.send(Event::AuthRequest(req));
         }
@@ -331,6 +341,16 @@ fn run(
             Err(RecvTimeoutError::Disconnected) => break,
         }
 
+        // If obexd is started later, pick it up without restarting the app.
+        ticks += 1;
+        if ticks % 20 == 0 && !cfg.disable_obex_services {
+            if state.obex_conn.is_none() {
+                let _ = event_tx.send(Event::Features(obex_features(&mut state)));
+            }
+            if !state.obex_agent_registered {
+                let _ = register_obex_agent(&mut state, &agent_tx, &cfg);
+            }
+        }
         refresh(&conn, &event_tx, &mut state, &cfg);
     }
 }
@@ -356,6 +376,114 @@ fn register_agent(conn: &Connection, agent_tx: &AsyncSender<AgentRequest>) -> Re
         "RequestDefaultAgent",
         &(path,),
     )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// OBEX Object Push receiving agent.
+//
+// obexd owns incoming transfers but delegates the accept/reject decision to a
+// registered `org.bluez.obex.Agent1`. `AuthorizePush` returns the full path the
+// received file should be written to, which is exactly where `receive-dir`
+// belongs. The prompt reuses the same AuthRequest/pending_auth dialog as
+// device pairing, so no new UI state machine is needed.
+
+/// Read the suggested filename from an OBEX Transfer1 object.
+fn obex_filename(conn: &Connection, transfer: &str) -> String {
+    conn.call_method(
+        Some("org.bluez.obex"),
+        transfer,
+        Some("org.freedesktop.DBus.Properties"),
+        "Get",
+        &("org.bluez.obex.Transfer1", "Filename"),
+    )
+    .and_then(|r| r.body().deserialize::<(OwnedValue,)>())
+    .ok()
+    .and_then(|(v,)| v.downcast_ref::<String>().ok())
+    .filter(|s| !s.is_empty())
+    .unwrap_or_else(|| "incoming.bin".into())
+}
+
+/// Strip any directory component from a peer-supplied filename so an incoming
+/// push can never write outside `receive-dir` (e.g. `../../etc/passwd`).
+fn safe_filename(raw: &str) -> String {
+    Path::new(raw)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "incoming.bin".into())
+}
+
+struct ObexAgent {
+    conn: Connection,
+    requests: AsyncSender<AgentRequest>,
+    next_id: AtomicUsize,
+    receive_dir: PathBuf,
+}
+
+#[interface(name = "org.bluez.obex.Agent1")]
+impl ObexAgent {
+    async fn release(&self) {}
+
+    async fn cancel(&self) {}
+
+    async fn authorize_push(&self, transfer: OwnedObjectPath) -> fdo::Result<String> {
+        let raw = obex_filename(&self.conn, transfer.as_str());
+        // A remote peer controls this name; keep it inside receive_dir.
+        let name = safe_filename(&raw);
+
+        // IDs start well above the device-agent range (100+) so both agents
+        // can share `pending_auth` without colliding.
+        let (tx, rx) = async_channel::bounded(1);
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1_000_001;
+        let req = AuthRequest {
+            id,
+            device: name.clone(),
+            device_name: name.clone(),
+            kind: AuthKind::FilePush(name.clone()),
+        };
+        let _ = self.requests.try_send((req, tx));
+        match rx.recv().await {
+            Ok(AuthResponse::Accept) => {
+                if let Err(e) = std::fs::create_dir_all(&self.receive_dir) {
+                    return Err(fdo::Error::Failed(format!(
+                        "Cannot create receive dir: {e}"
+                    )));
+                }
+                Ok(self.receive_dir.join(&name).to_string_lossy().to_string())
+            }
+            _ => Err(fdo::Error::Failed("File push rejected by user".into())),
+        }
+    }
+}
+
+fn register_obex_agent(
+    state: &mut ThreadState,
+    requests: &AsyncSender<AgentRequest>,
+    cfg: &Config,
+) -> Result<()> {
+    let Some(conn) = state.obex_conn.clone() else {
+        return Ok(());
+    };
+    if state.obex_agent_registered {
+        return Ok(());
+    }
+    let agent = ObexAgent {
+        conn: conn.clone(),
+        requests: requests.clone(),
+        next_id: AtomicUsize::new(1_000_000),
+        receive_dir: cfg.effective_receive_dir(),
+    };
+    conn.object_server().at(OBEX_AGENT_PATH, agent)?;
+    let path = OwnedObjectPath::try_from(OBEX_AGENT_PATH)?;
+    conn.call_method(
+        Some("org.bluez.obex"),
+        "/org/bluez/obex",
+        Some("org.bluez.obex.AgentManager1"),
+        "RegisterAgent",
+        &(path,),
+    )?;
+    state.obex_agent_registered = true;
     Ok(())
 }
 
@@ -462,7 +590,10 @@ fn handle_command(
             let _ = tx.send(status_of("Adapter selected", Level::Info));
             return;
         }
-        Refresh => return,
+        Refresh => {
+            let _ = tx.send(status_of("Device list refreshed", Level::Info));
+            return;
+        }
         _ => {}
     }
 
@@ -549,37 +680,97 @@ fn handle_command(
                 .map(|_| ());
             report(tx, r, "Device removed");
         }
+        SendFiles { .. } if cfg.disable_obex_services => {
+            let _ = tx.send(status_of("OBEX services are disabled", Level::Warning));
+        }
         SendFiles { device, files } => {
             let dst = as_address(&device);
-            let root = cfg.effective_receive_dir();
-            let _ = std::fs::create_dir_all(&root);
-            let mut ok = 0;
-            for f in files {
-                match obex_send_file(conn, &dst, &f) {
-                    Ok(()) => ok += 1,
-                    Err(e) => {
-                        let _ = tx.send(status_of(format!("{}: {e}", f.display()), Level::Error));
+            // The receive directory belongs to obexd on the *receiving* side;
+            // creating it locally before a send has no effect.
+            let Some(obex) = obex_connection(state) else {
+                let _ = tx.send(status_of(
+                    "Cannot send: OBEX service (obexd) is unavailable. Install bluez-obexd and/or start it with `systemctl --user start obex.service`.",
+                    Level::Error,
+                ));
+                return;
+            };
+            // CreateSession blocks for several seconds while BlueZ tries to
+            // reach an unreachable/unpaired device (measured ~5s here). Doing
+            // it on the polling thread would freeze snapshots and status for
+            // that whole time, so hand the batch to a side thread: the UI
+            // keeps refreshing and the result arrives whenever OBEX answers.
+            let tx = tx.clone();
+            thread::spawn(move || {
+                let mut ok = 0;
+                for f in &files {
+                    match obex_send_file(&obex, &dst, f) {
+                        Ok(()) => ok += 1,
+                        Err(e) => {
+                            let _ =
+                                tx.send(status_of(format!("{}: {e}", f.display()), Level::Error));
+                        }
                     }
                 }
-            }
-            if ok > 0 {
-                let _ = tx.send(status_of(
-                    format!("Queued {ok} file(s) via OBEX Object Push"),
-                    Level::Success,
-                ));
-            }
+                if ok > 0 {
+                    let _ = tx.send(status_of(
+                        format!("Queued {ok} file(s) via OBEX Object Push"),
+                        Level::Success,
+                    ));
+                }
+            });
         }
         PlayerCommand(c) => {
+            if matches!(c, PlayerCmd::ToggleShuffle | PlayerCmd::CycleRepeat) {
+                let ok = if matches!(c, PlayerCmd::ToggleShuffle) {
+                    "Shuffle toggled"
+                } else {
+                    "Repeat cycled"
+                };
+                report(tx, player_property_cycle(conn, c), ok);
+                return;
+            }
+            if matches!(c, PlayerCmd::VolumeUp | PlayerCmd::VolumeDown) {
+                let delta = if matches!(c, PlayerCmd::VolumeUp) {
+                    8
+                } else {
+                    -8
+                };
+                match adjust_volume(conn, delta) {
+                    Ok(()) => {
+                        let _ = tx.send(status_of("Volume adjusted", Level::Success));
+                    }
+                    // Not an error: many adapters simply have no transport
+                    // volume property; the system mixer owns volume there.
+                    Err(e) => {
+                        let _ = tx.send(status_of(format!("{e}"), Level::Warning));
+                    }
+                }
+                return;
+            }
             if let Some(p) = find_player_path(conn) {
                 let name = match c {
-                    PlayerCmd::TogglePlay | PlayerCmd::Play => Some("Play"),
+                    // MediaPlayer1 has no TogglePlay: read the current Status
+                    // and issue the opposite command, otherwise the "play/pause"
+                    // key could only ever start playback.
+                    PlayerCmd::TogglePlay => {
+                        let playing = get_properties(conn, &p, "org.bluez.MediaPlayer1")
+                            .map(|props| {
+                                as_string(&props, "Status").eq_ignore_ascii_case("playing")
+                            })
+                            .unwrap_or(false);
+                        Some(if playing { "Pause" } else { "Play" })
+                    }
+                    PlayerCmd::Play => Some("Play"),
                     PlayerCmd::Pause => Some("Pause"),
                     PlayerCmd::Stop => Some("Stop"),
                     PlayerCmd::Next => Some("Next"),
                     PlayerCmd::Previous => Some("Previous"),
                     PlayerCmd::FastForward => Some("FastForward"),
                     PlayerCmd::Rewind => Some("Rewind"),
-                    PlayerCmd::VolumeUp | PlayerCmd::VolumeDown => None,
+                    PlayerCmd::VolumeUp
+                    | PlayerCmd::VolumeDown
+                    | PlayerCmd::ToggleShuffle
+                    | PlayerCmd::CycleRepeat => None,
                 };
                 if let Some(name) = name {
                     let r = method(conn, &p, "org.bluez.MediaPlayer1", name);
@@ -589,40 +780,81 @@ fn handle_command(
                 let _ = tx.send(status_of("No media player is available", Level::Warning));
             }
         }
-        ShowPlayer(_) | HidePlayer => {}
+        // UI-only commands on real hardware; acknowledge them with a neutral
+        // status so the bar never shows a stale, unrelated error.
+        ShowPlayer(_) => {
+            let _ = tx.send(info("Media player shown"));
+        }
+        HidePlayer => {
+            let _ = tx.send(info("Media player hidden"));
+        }
         ConnectNetwork { device, role } => {
+            // Network1.Connect accepts "panu"/"nap"/"gn" or a full 128-bit
+            // UUID; a bare short form such as "1115" is rejected. DUN is not
+            // a BNEP role at all, so report that instead of firing a call that
+            // can never succeed.
+            if role == NetworkRole::Dun {
+                let _ = tx.send(status_of(
+                    "DUN dial-up is not provided by BlueZ Network1 (reserved)",
+                    Level::Warning,
+                ));
+                return;
+            }
             let p = device_path(conn, &device);
+            let uuid = format!("0000{}-0000-1000-8000-00805f9b34fb", role.uuid());
+            let key = network_key(&device, role);
             let r = conn
                 .call_method(
                     Some("org.bluez"),
                     p.as_str(),
                     Some("org.bluez.Network1"),
                     "Connect",
-                    &(role.uuid(),),
+                    &(uuid,),
                 )
                 .map(|_| ());
+            if r.is_ok() {
+                state.disconnected_networks.remove(&key);
+            }
             report(tx, r, &format!("Connected {} network", role.label()));
         }
-        DisconnectNetwork(_id) => {
-            let _ = tx.send(status_of(
-                "Disconnect with `org.bluez.Network1.Disconnect` on the device",
-                Level::Info,
-            ));
+        DisconnectNetwork(id) => {
+            let Some((addr, role)) = state.network_devices.get(&id).cloned() else {
+                let _ = tx.send(status_of("No such network connection", Level::Warning));
+                return;
+            };
+            let p = device_path(conn, &addr);
+            let r = method(conn, &p, "org.bluez.Network1", "Disconnect");
+            if r.is_ok() {
+                // Keep it hidden on subsequent polls (the list is synthesised
+                // from connected devices and would otherwise come straight back).
+                state.disconnected_networks.insert(network_key(&addr, role));
+            }
+            report(tx, r, "Disconnected network");
         }
         SetAudioProfile { profile, .. } => {
+            // BlueZ itself does not switch A2DP/HFP profiles; that belongs to
+            // bluez-alsa / PipeWire / PulseAudio. Say so plainly instead of
+            // pretending the switch succeeded.
             let _ = tx.send(status_of(
                 format!("Switching {profile} needs bluez-alsa/PulseAudio; use your audio server"),
-                Level::Info,
+                Level::Warning,
             ));
         }
-        SuspendTransfer(id) | ResumeTransfer(id) | CancelTransfer(id) => {
-            let _ = id;
-            let _ = tx.send(status_of(
-                "Transfer control is provided by obexd",
-                Level::Info,
-            ));
+        SuspendTransfer(id) => {
+            control_transfer(state, tx, id, "Suspend", "Transfer suspended");
         }
-        RefreshNetworks(_) | RefreshProfiles(_) => {}
+        ResumeTransfer(id) => {
+            control_transfer(state, tx, id, "Resume", "Transfer resumed");
+        }
+        CancelTransfer(id) => {
+            control_transfer(state, tx, id, "Cancel", "Transfer cancelled");
+        }
+        RefreshNetworks(_) => {
+            let _ = tx.send(info("Network list refreshed"));
+        }
+        RefreshProfiles(_) => {
+            let _ = tx.send(info("Audio profiles refreshed"));
+        }
         _ => {}
     }
 }
@@ -649,6 +881,10 @@ fn current_adapter(conn: &Connection, state: &mut ThreadState, cfg: &Config) -> 
         }
     }
     "/org/bluez/hci0".into()
+}
+
+fn network_key(addr: &str, role: NetworkRole) -> String {
+    format!("{addr}|{}", role.uuid())
 }
 
 fn as_address(addr_or_path: &str) -> String {
@@ -690,16 +926,63 @@ fn find_player_path(conn: &Connection) -> Option<String> {
     None
 }
 
+/// Try the session bus, then the system bus, for `org.bluez.obex`.
+///
+/// Sending a call to a well-known name triggers D-Bus activation, so this
+/// also starts `obexd` on demand when the service file is installed
+/// (`bluez-obexd` provides `/usr/share/dbus-1/services/org.bluez.obex.service`).
+fn probe_obex() -> Option<Connection> {
+    for c in [Connection::session(), Connection::system()] {
+        let Ok(conn) = c else { continue };
+        // Peer.Ping on the well-known name forces the bus to activate obexd.
+        if conn
+            .call_method(
+                Some("org.bluez.obex"),
+                "/org/bluez/obex",
+                Some("org.freedesktop.DBus.Peer"),
+                "Ping",
+                &(),
+            )
+            .is_ok()
+        {
+            return Some(conn);
+        }
+    }
+    None
+}
+
+/// Return (and cache) the OBEX connection, re-probing if it went away.
+fn obex_connection(state: &mut ThreadState) -> Option<Connection> {
+    if state.obex_conn.is_none() {
+        state.obex_conn = probe_obex();
+    }
+    state.obex_conn.clone()
+}
+
+/// Feature flags that reflect whether OBEX can actually be used.
+fn obex_features(state: &mut ThreadState) -> FeatureSet {
+    let has_obex = obex_connection(state).is_some();
+    let mut f = FeatureSet::all();
+    f.obex = has_obex;
+    f.send_file = has_obex;
+    f.receive_file = has_obex;
+    f
+}
+
 fn obex_send_file(conn: &Connection, destination: &str, file: &std::path::Path) -> Result<()> {
     let mut args = HashMap::<&str, Value<'_>>::new();
     args.insert("Target", Value::from("OPP"));
-    let reply = conn.call_method(
-        Some("org.bluez.obex"),
-        "/org/bluez/obex",
-        Some("org.bluez.obex.Client1"),
-        "CreateSession",
-        &(destination, args),
-    )?;
+    let reply = conn
+        .call_method(
+            Some("org.bluez.obex"),
+            "/org/bluez/obex",
+            Some("org.bluez.obex.Client1"),
+            "CreateSession",
+            &(destination, args),
+        )
+        .map_err(|e| {
+            anyhow!("OBEX CreateSession failed ({e}); is the device paired and in range?")
+        })?;
     let (session,): (OwnedObjectPath,) = reply.body().deserialize()?;
     let name = file.to_string_lossy().to_string();
     conn.call_method(
@@ -708,8 +991,104 @@ fn obex_send_file(conn: &Connection, destination: &str, file: &std::path::Path) 
         Some("org.bluez.obex.ObjectPush1"),
         "SendFile",
         &(name,),
-    )?;
+    )
+    .map_err(|e| anyhow!("OBEX SendFile failed ({e})"))?;
     Ok(())
+}
+
+/// Control an OBEX transfer through its D-Bus object on obexd.
+fn control_transfer(
+    state: &mut ThreadState,
+    tx: &Sender<Event>,
+    id: usize,
+    method_name: &str,
+    ok: &str,
+) {
+    let Some(obex) = obex_connection(state) else {
+        let _ = tx.send(status_of("OBEX service unavailable", Level::Warning));
+        return;
+    };
+    let Some(path) = state.transfer_paths.get(&id).cloned() else {
+        let _ = tx.send(status_of("No such transfer", Level::Warning));
+        return;
+    };
+    let r = obex
+        .call_method(
+            Some("org.bluez.obex"),
+            path.as_str(),
+            Some("org.bluez.obex.Transfer1"),
+            method_name,
+            &(),
+        )
+        .map(|_| ());
+    report(tx, r, ok);
+}
+
+/// MediaPlayer1 exposes writable `Shuffle` / `Repeat` string properties.
+fn player_property_cycle(conn: &Connection, c: PlayerCmd) -> Result<()> {
+    let Some(path) = find_player_path(conn) else {
+        return Err(anyhow!("No media player is available"));
+    };
+    let props = get_properties(conn, &path, "org.bluez.MediaPlayer1")?;
+    match c {
+        PlayerCmd::ToggleShuffle => {
+            let cur = as_string(&props, "Shuffle").to_ascii_lowercase();
+            let next = if cur.is_empty() || cur == "off" {
+                "alltracks"
+            } else {
+                "off"
+            };
+            set_property(
+                conn,
+                &path,
+                "org.bluez.MediaPlayer1",
+                "Shuffle",
+                Value::from(next),
+            )?;
+        }
+        PlayerCmd::CycleRepeat => {
+            let cur = as_string(&props, "Repeat").to_ascii_lowercase();
+            let next = match cur.as_str() {
+                "" | "off" => "singletrack",
+                "singletrack" => "alltracks",
+                "alltracks" => "group",
+                _ => "off",
+            };
+            set_property(
+                conn,
+                &path,
+                "org.bluez.MediaPlayer1",
+                "Repeat",
+                Value::from(next),
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// BlueZ exposes a writable `Volume` (u16, 0..127) on MediaTransport1.
+fn adjust_volume(conn: &Connection, delta: i16) -> Result<()> {
+    let objects = managed_objects(conn, "org.bluez")?;
+    let iface = OwnedInterfaceName::try_from("org.bluez.MediaTransport1").unwrap();
+    for (path, ifaces) in &objects {
+        let Some(props) = ifaces.get(&iface) else {
+            continue;
+        };
+        let cur = as_u16(props, "Volume").unwrap_or(0) as i16;
+        let next = (cur + delta).clamp(0, 127) as u16;
+        set_property(
+            conn,
+            path.as_str(),
+            "org.bluez.MediaTransport1",
+            "Volume",
+            Value::U16(next),
+        )?;
+        return Ok(());
+    }
+    Err(anyhow!(
+        "no MediaTransport1 with a writable Volume property"
+    ))
 }
 
 fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState, cfg: &Config) {
@@ -723,7 +1102,11 @@ fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState, cfg: 
 
     let mut adapters = Vec::new();
     let mut devices = Vec::new();
-    let mut player: Option<PlayerState> = None;
+    // Resolve the player only after `devices` is complete. The object map is
+    // a HashMap, so a MediaPlayer1 object may be visited *before* its Device1
+    // object; parsing it inside the loop used to leave the player with an
+    // empty device/device_name depending on iteration order.
+    let mut player_source: Option<(&str, &HashMap<String, OwnedValue>)> = None;
 
     for (path, ifaces) in &objects {
         let adapter_props =
@@ -774,9 +1157,10 @@ fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState, cfg: 
         }
 
         if let Some(p) = player_props {
-            player = Some(parse_player(p, path.as_str(), &devices));
+            player_source = Some((path.as_str(), p));
         }
     }
+    let player = player_source.map(|(p, props)| parse_player(props, p, &devices));
 
     let _ = tx.send(Event::Snapshot {
         adapters,
@@ -792,7 +1176,12 @@ fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState, cfg: 
             ("1116", NetworkRole::Nap),
             ("1103", NetworkRole::Dun),
         ] {
-            if d.has_service(n) && d.connected {
+            if d.has_service(n)
+                && d.connected
+                && !state
+                    .disconnected_networks
+                    .contains(&network_key(&d.address, role))
+            {
                 networks.push(Network {
                     id: i * 10 + networks.len(),
                     device: d.address.clone(),
@@ -804,6 +1193,12 @@ fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState, cfg: 
                 });
             }
         }
+    }
+    state.network_devices.clear();
+    for n in &networks {
+        state
+            .network_devices
+            .insert(n.id, (n.device.clone(), n.role));
     }
     let _ = tx.send(Event::Networks(networks));
 
@@ -824,7 +1219,7 @@ fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState, cfg: 
             if d.has_service(short) {
                 profiles.push(ProfileInfo {
                     name: name.into(),
-                    uuid: super::service_name(short).to_string(),
+                    uuid: super::service_name(short, crate::i18n::Lang::En).to_string(),
                     description: desc.into(),
                     active: d.connected,
                     device: d.display_name(),
@@ -834,9 +1229,15 @@ fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState, cfg: 
     }
     let _ = tx.send(Event::Profiles(profiles));
 
-    // OBEX transfers, when obexd exports an ObjectManager.
-    if let Ok(obex) = managed_objects(conn, "org.bluez.obex") {
+    // OBEX transfers live on the connection that owns `org.bluez.obex`
+    // (usually the session bus), not the BlueZ system bus.
+    let obex_objects = state
+        .obex_conn
+        .as_ref()
+        .and_then(|c| managed_objects(c, "org.bluez.obex").ok());
+    if let Some(obex) = obex_objects {
         state.obex_seen = true;
+        state.transfer_paths.clear();
         let mut transfers = Vec::new();
         for (path, ifaces) in &obex {
             let Some(p) =
@@ -845,14 +1246,16 @@ fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState, cfg: 
                 continue;
             };
             let status = as_string(p, "Status").to_ascii_lowercase();
+            let id = path
+                .as_str()
+                .as_bytes()
+                .iter()
+                .map(|b| *b as usize)
+                .sum::<usize>()
+                % 100_000;
+            state.transfer_paths.insert(id, path.as_str().to_string());
             transfers.push(Transfer {
-                id: path
-                    .as_str()
-                    .as_bytes()
-                    .iter()
-                    .map(|b| *b as usize)
-                    .sum::<usize>()
-                    % 100_000,
+                id,
                 name: as_string(p, "Filename"),
                 device: as_string(p, "Session"),
                 device_name: String::new(),
@@ -873,6 +1276,7 @@ fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState, cfg: 
         state.last_transfer_count = transfers.len();
         let _ = tx.send(Event::Transfers(transfers));
     } else if !state.obex_seen && state.last_transfer_count == 0 {
+        state.transfer_paths.clear();
         let _ = tx.send(Event::Transfers(Vec::new()));
     }
 
@@ -930,4 +1334,104 @@ fn parse_player(p: &HashMap<String, OwnedValue>, path: &str, devices: &[Device])
         ps.device_name = d.display_name();
     }
     ps
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_state() -> ThreadState {
+        ThreadState {
+            selected_adapter: String::new(),
+            pending_auth: HashMap::new(),
+            obex_seen: false,
+            last_transfer_count: 0,
+            obex_conn: None,
+            transfer_paths: HashMap::new(),
+            network_devices: HashMap::new(),
+            disconnected_networks: HashSet::new(),
+            obex_agent_registered: false,
+        }
+    }
+
+    /// OBEX capability flags must be driven by the live probe, never hardcoded
+    /// to true (that is what made "Send file" fail with a raw ServiceUnknown).
+    #[test]
+    fn obex_features_track_the_live_probe() {
+        let mut state = empty_state();
+        let f = obex_features(&mut state);
+        assert_eq!(f.obex, f.send_file);
+        assert_eq!(f.obex, f.receive_file);
+        assert_eq!(f.obex, state.obex_conn.is_some());
+        // Non-OBEX features always remain available.
+        assert!(f.adapter && f.device && f.network);
+    }
+
+    #[test]
+    fn integer_getters_accept_every_dbus_integer_width() {
+        use zbus::zvariant::OwnedValue;
+        let mut p = HashMap::new();
+        p.insert("a".to_string(), OwnedValue::from(-55i32));
+        assert_eq!(as_i16(&p, "a"), Some(-55));
+        p.insert("a".to_string(), OwnedValue::from(77u32));
+        assert_eq!(as_u8(&p, "a"), Some(77));
+        p.insert("a".to_string(), OwnedValue::from(64i64));
+        assert_eq!(as_u16(&p, "a"), Some(64));
+        p.insert("a".to_string(), OwnedValue::from(4096u64));
+        assert_eq!(as_u32(&p, "a"), Some(4096));
+        assert_eq!(as_u64(&p, "a"), Some(4096));
+        // Out-of-range values must be dropped, never wrapped.
+        p.insert("a".to_string(), OwnedValue::from(999u32));
+        assert_eq!(as_u8(&p, "a"), None);
+        assert_eq!(as_u16(&p, "missing"), None);
+    }
+
+    #[test]
+    fn player_device_name_requires_the_complete_device_list() {
+        // refresh() defers parse_player until `devices` is fully built: a
+        // MediaPlayer1 object can be visited before its Device1 object because
+        // GetManagedObjects is a HashMap. This pins that contract down.
+        use zbus::zvariant::{OwnedValue, Str};
+        let mut props = HashMap::new();
+        props.insert(
+            "Status".to_string(),
+            OwnedValue::from(Str::from("playing".to_string())),
+        );
+        props.insert("Position".to_string(), OwnedValue::from(1000u32));
+        let path = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF/player0";
+        let bare = parse_player(&props, path, &[]);
+        assert_eq!(bare.device_name, "");
+        let full = vec![Device {
+            path: "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF".into(),
+            address: "AA:BB:CC:DD:EE:FF".into(),
+            name: "Mock Phone".into(),
+            ..Default::default()
+        }];
+        let ok = parse_player(&props, path, &full);
+        assert_eq!(ok.device_name, "Mock Phone");
+        assert_eq!(ok.device, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(ok.status, PlayStatus::Playing);
+        assert_eq!(ok.position_ms, 1000);
+    }
+
+    #[test]
+    fn obex_filename_cannot_escape_the_receive_dir() {
+        assert_eq!(safe_filename("photo.jpg"), "photo.jpg");
+        assert_eq!(safe_filename("../../etc/passwd"), "passwd");
+        assert_eq!(safe_filename("/tmp/a/b.txt"), "b.txt");
+        assert_eq!(safe_filename(""), "incoming.bin");
+    }
+
+    #[test]
+    fn network_key_is_distinct_per_device_and_role() {
+        assert_eq!(network_key("AA:BB", NetworkRole::Panu), "AA:BB|1115");
+        assert_ne!(
+            network_key("AA:BB", NetworkRole::Panu),
+            network_key("AA:BB", NetworkRole::Nap)
+        );
+        assert_ne!(
+            network_key("AA:BB", NetworkRole::Panu),
+            network_key("CC:DD", NetworkRole::Panu)
+        );
+    }
 }

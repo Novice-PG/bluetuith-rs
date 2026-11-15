@@ -2,27 +2,31 @@
 # Copy to ~/.config/bluetuith-rs/config.toml (or run `bluetuith-rs --generate`).
 
 adapter = "hci0"                 # adapter name or MAC; empty = first adapter
-receive-dir = ""                 # inbound OBEX files; empty = ~/Downloads/bluetuith-rs
-gsm-apn = ""                     # APN for DUN dial-up networking
-gsm-number = "*99#"              # number to dial for DUN
+receive-dir = ""                 # incoming OBEX files land here; empty = ~/Downloads/bluetuith-rs
+gsm-apn = ""                     # reserved for DUN dial-up (not used yet)
+gsm-number = "*99#"              # reserved for DUN dial-up (not used yet)
 adapter-states = ""              # e.g. "powered:yes,discoverable:no,scan:no"
 connect-bdaddr = ""              # auto-connect this device on startup
 
-no-warning = false               # suppress the unavailable-features banner
+no-warning = false               # suppress startup warnings
 no-help-display = false          # hide the bottom keybinding strip
 confirm-on-quit = true           # ask "Quit (y/n)?" before exiting
-disable-obex-services = false    # disable OBEX services
+disable-obex-services = false    # disable Bluetooth file transfer (OBEX)
 
 theme = "Midnight"               # Midnight | Nord | Catppuccin | Dracula |
                                  # Gruvbox | Tokyo Night | Rosé Pine |
                                  # Solarized | Daylight
 accent = ""                      # optional override, e.g. "#5ec4ff"
 default-sort = "Name"            # Name | Address | Rssi | Battery | State | Kind
+language = "en"                  # en | zh (auto-detected from $LANG if omitted)
 show-hidden-files = false
 scan-on-start = false
 demo = false                     # run against a simulated adapter
 
 [keybindings]
+# Single letters are case-insensitive (q and Q are the same key).
 # Quit = "Ctrl+q"
 # Scan = "s"
-# ThemePicker = "F4"
+# Discoverable = "Alt+s"
+# ThemePicker = "F7"
+# About = "F9"

@@ -5,11 +5,12 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
 use crate::backend::{AdapterProperty, Backend, Command, Event};
 use crate::config::Config;
+use crate::i18n::{fill, Lang, Tr};
 use crate::keybind::{Action, Context, KeyMap};
 use crate::model::*;
 use crate::theme::Theme;
@@ -38,23 +39,24 @@ pub enum Overlay {
 }
 
 impl Overlay {
-    pub fn title(self) -> &'static str {
+    pub fn title(self, lang: Lang) -> &'static str {
+        let tr = lang.tr();
         match self {
-            Overlay::Menu => "Menu",
-            Overlay::Help => "Keybindings & Help",
-            Overlay::Confirm => "Confirm",
-            Overlay::AdapterChange => "Select Adapter",
-            Overlay::DeviceInfo => "Device Information",
-            Overlay::FilePicker => "Send Files",
-            Overlay::Progress => "Transfers",
-            Overlay::Player => "Media Player",
-            Overlay::Network => "Network Options",
-            Overlay::Profiles => "Audio Profiles",
-            Overlay::Auth => "Pairing Request",
-            Overlay::ThemePicker => "Theme",
-            Overlay::Log => "Event Log",
-            Overlay::CommandPalette => "Command Palette",
-            Overlay::About => "About",
+            Overlay::Menu => tr.menu,
+            Overlay::Help => tr.keybindings_help,
+            Overlay::Confirm => tr.confirm,
+            Overlay::AdapterChange => tr.select_adapter,
+            Overlay::DeviceInfo => tr.device_info,
+            Overlay::FilePicker => tr.send_files,
+            Overlay::Progress => tr.transfers,
+            Overlay::Player => tr.media_player,
+            Overlay::Network => tr.network,
+            Overlay::Profiles => tr.audio_profiles,
+            Overlay::Auth => tr.pairing_request,
+            Overlay::ThemePicker => tr.theme,
+            Overlay::Log => tr.event_log,
+            Overlay::CommandPalette => tr.command_palette,
+            Overlay::About => tr.about,
         }
     }
 }
@@ -71,12 +73,13 @@ impl MenuId {
     pub fn all() -> [MenuId; 4] {
         [MenuId::Adapter, MenuId::Device, MenuId::View, MenuId::Help]
     }
-    pub fn label(self) -> &'static str {
+    pub fn label(self, lang: Lang) -> &'static str {
+        let tr = lang.tr();
         match self {
-            MenuId::Adapter => "Adapter",
-            MenuId::Device => "Device",
-            MenuId::View => "View",
-            MenuId::Help => "Help",
+            MenuId::Adapter => tr.m_adapter,
+            MenuId::Device => tr.m_device,
+            MenuId::View => tr.m_view,
+            MenuId::Help => tr.m_help,
         }
     }
     pub fn index(self) -> usize {
@@ -156,19 +159,55 @@ pub struct LayoutInfo {
     pub menu_rects: [Rect; 4],
     pub device_rows: Rect,
     pub device_scroll: usize,
+    /// Clickable regions in the bottom hint strip, paired with their action.
+    pub help_rects: Vec<(Rect, Action)>,
+    /// Outer rect of the topmost overlay (for click-outside-to-close).
+    pub overlay_rect: Option<Rect>,
+    /// Clickable rows of the topmost overlay, paired with their item index.
+    pub overlay_items: Vec<(Rect, usize)>,
 }
 
 // ---------------------------------------------------------------------------
 // App
+
+/// The active network connection for a role (rows are roles, not ids).
+fn network_id_for_role(networks: &[Network], role: NetworkRole) -> Option<usize> {
+    networks
+        .iter()
+        .find(|n| n.role == role && n.connected)
+        .map(|n| n.id)
+}
+
+/// Actions that must never appear as a command in the palette: pure cursor
+/// movement has no effect there, and local dialogs/toggles are not commands.
+/// `Suspend` is especially important to exclude — running it raises SIGTSTP
+/// and would freeze the whole TUI from a menu that looks harmless.
+fn is_palette_excluded(a: Action) -> bool {
+    matches!(
+        a,
+        Action::Select
+            | Action::NavigateUp
+            | Action::NavigateDown
+            | Action::NavigateTop
+            | Action::NavigateBottom
+            | Action::Close
+            | Action::Cancel
+            | Action::Switch
+            | Action::Suspend
+    )
+}
 
 pub struct App {
     pub config: Config,
     pub theme: Theme,
     pub keys: KeyMap,
     pub backend: Box<dyn Backend>,
+    pub lang: Lang,
 
     pub adapters: Vec<Adapter>,
     pub selected_adapter: usize,
+    /// Whether the startup adapter preference has been applied to the UI yet.
+    pub adapter_initialized: bool,
     pub devices: Vec<Device>,
     pub selected: usize,
     pub sort: SortKey,
@@ -199,6 +238,10 @@ pub struct App {
     pub overlay_scroll: usize,
     pub palette_query: String,
     pub palette_items: Vec<Action>,
+    /// 0 = category list, 1 = actions inside the chosen category.
+    pub palette_stage: u8,
+    pub palette_category: Option<Context>,
+    pub palette_categories: Vec<Context>,
 
     pub layout: LayoutInfo,
     pub tick: u64,
@@ -207,6 +250,7 @@ pub struct App {
     pub mouse_enabled: bool,
     pub startup_warning: Option<String>,
     pub last_click: Option<(Instant, usize)>,
+    pub last_overlay_click: Option<(Instant, usize)>,
 }
 
 impl App {
@@ -214,6 +258,7 @@ impl App {
         let keys = KeyMap::from_config(&config.keybindings);
         let mut theme = Theme::by_name(&config.theme).unwrap_or_else(Theme::midnight);
         config.apply_accent(&mut theme);
+        let lang = Lang::parse(&config.language);
         let show_details = true;
         let show_player_bar = true;
         let sort = match config.default_sort.to_ascii_lowercase().as_str() {
@@ -230,8 +275,10 @@ impl App {
             theme,
             keys,
             backend,
+            lang,
             adapters: Vec::new(),
             selected_adapter: 0,
+            adapter_initialized: false,
             devices: Vec::new(),
             selected: 0,
             sort,
@@ -246,7 +293,7 @@ impl App {
             features: FeatureSet::all(),
             status: StatusMessage {
                 level: Level::Info,
-                text: "Ready".into(),
+                text: lang.tr().msg_ready.into(),
                 busy: false,
             },
             status_at: Instant::now(),
@@ -263,6 +310,9 @@ impl App {
             overlay_scroll: 0,
             palette_query: String::new(),
             palette_items: Vec::new(),
+            palette_stage: 0,
+            palette_category: None,
+            palette_categories: Vec::new(),
             layout: LayoutInfo::default(),
             tick: 0,
             running: true,
@@ -270,13 +320,28 @@ impl App {
             mouse_enabled: true,
             startup_warning: None,
             last_click: None,
+            last_overlay_click: None,
         };
 
+        let mut warnings = Vec::new();
         if !app.keys.conflicts.is_empty() && !app.config.no_warning {
-            app.startup_warning = Some(format!(
-                "Keybinding conflicts: {}",
-                app.keys.conflicts.join("; ")
+            warnings.push(fill(
+                app.tr().msg_key_conflicts,
+                app.keys.conflicts.join("; "),
             ));
+        }
+        // These two options are accepted for config compatibility but do not
+        // drive anything yet; say so instead of silently ignoring them.
+        if !app.config.gsm_apn.is_empty() || app.config.gsm_number != "*99#" {
+            warnings.push(app.tr().msg_gsm_reserved.to_string());
+        }
+        if !warnings.is_empty() {
+            app.startup_warning = Some(warnings.join("; "));
+        }
+        if app.config.disable_obex_services {
+            app.features.obex = false;
+            app.features.send_file = false;
+            app.features.receive_file = false;
         }
         app.log.push(format!(
             "bluetuith-rs {} started ({} backend)",
@@ -287,6 +352,16 @@ impl App {
     }
 
     // ---- small helpers ----------------------------------------------------
+
+    /// The active language's string table.
+    pub fn tr(&self) -> Tr {
+        self.lang.tr()
+    }
+
+    /// BlueZ has no API to switch A2DP/HFP profiles; only the simulator can.
+    pub fn audio_profiles_writable(&self) -> bool {
+        self.backend.is_demo()
+    }
 
     pub fn current_adapter(&self) -> Option<&Adapter> {
         self.adapters.get(self.selected_adapter)
@@ -310,7 +385,10 @@ impl App {
                 needle.is_empty()
                     || d.display_name().to_ascii_lowercase().contains(&needle)
                     || d.address.to_ascii_lowercase().contains(&needle)
-                    || d.kind().label().to_ascii_lowercase().contains(&needle)
+                    || d.kind()
+                        .label(self.lang)
+                        .to_ascii_lowercase()
+                        .contains(&needle)
             })
             .collect();
         match self.sort {
@@ -330,8 +408,8 @@ impl App {
             }),
             SortKey::Kind => out.sort_by(|a, b| {
                 a.kind()
-                    .label()
-                    .cmp(b.kind().label())
+                    .label(self.lang)
+                    .cmp(b.kind().label(self.lang))
                     .then(a.display_name().cmp(&b.display_name()))
             }),
         }
@@ -399,6 +477,9 @@ impl App {
             }
             Overlay::CommandPalette => {
                 self.palette_query.clear();
+                self.palette_stage = 0;
+                self.palette_category = None;
+                self.overlay_index = 0;
                 self.rebuild_palette();
             }
             Overlay::FilePicker => {
@@ -433,14 +514,46 @@ impl App {
     }
 
     fn rebuild_palette(&mut self) {
-        let q = self.palette_query.to_ascii_lowercase();
-        self.palette_items = Action::all()
-            .into_iter()
-            .filter(|a| q.is_empty() || a.name().to_ascii_lowercase().contains(&q))
-            .collect();
-        self.overlay_index = self
-            .overlay_index
-            .min(self.palette_items.len().saturating_sub(1));
+        let q = self.palette_query.trim().to_ascii_lowercase();
+        let all_ctx = [
+            Context::App,
+            Context::Device,
+            Context::Files,
+            Context::Progress,
+            Context::Player,
+            Context::Extra,
+        ];
+        if self.palette_stage == 0 {
+            // Level 1: categories that actually contain actions.
+            self.palette_categories = all_ctx
+                .into_iter()
+                .filter(|c| Action::all().into_iter().any(|a| a.context() == *c))
+                .filter(|c| {
+                    q.is_empty() || c.label_for(self.lang).to_ascii_lowercase().contains(&q)
+                })
+                .collect();
+            self.overlay_index = self
+                .overlay_index
+                .min(self.palette_categories.len().saturating_sub(1));
+        } else {
+            // Level 2: actions in the chosen category.
+            let cat = self.palette_category;
+            self.palette_items = Action::all()
+                .into_iter()
+                // Pure navigation/selection keys and local toggles are not
+                // "commands"; showing them would give dead or harmful entries.
+                .filter(|a| !is_palette_excluded(*a))
+                .filter(|a| cat.is_none_or(|c| a.context() == c))
+                .filter(|a| {
+                    q.is_empty()
+                        || a.name().to_ascii_lowercase().contains(&q)
+                        || a.name_for(self.lang).to_ascii_lowercase().contains(&q)
+                })
+                .collect();
+            self.overlay_index = self
+                .overlay_index
+                .min(self.palette_items.len().saturating_sub(1));
+        }
     }
 
     // ---- backend events ---------------------------------------------------
@@ -459,6 +572,22 @@ impl App {
                         .min(self.adapters.len().saturating_sub(1));
                 }
                 self.devices = devices;
+                // Honour the configured adapter on the first snapshot so the
+                // UI selection matches the adapter the backend commands act on.
+                // Later snapshots must not undo a user's manual choice.
+                if !self.adapter_initialized {
+                    self.adapter_initialized = true;
+                    let wanted = self.config.adapter.trim();
+                    if !wanted.is_empty() {
+                        if let Some(i) = self.adapters.iter().position(|a| {
+                            a.path == wanted
+                                || a.id == wanted
+                                || a.address.eq_ignore_ascii_case(wanted)
+                        }) {
+                            self.selected_adapter = i;
+                        }
+                    }
+                }
                 if let Some(addr) = prev_sel {
                     if let Some(i) = self
                         .visible_devices()
@@ -473,11 +602,22 @@ impl App {
                     .min(self.visible_devices().len().saturating_sub(1));
             }
             Event::Status(s) => {
+                let mut s = s;
+                s.text = crate::i18n::translate_status(&s.text, self.lang);
                 self.log_line(format!("[{:?}] {}", s.level, s.text));
                 self.status = s;
                 self.status_at = Instant::now();
             }
-            Event::Features(f) => self.features = f,
+            Event::Features(f) => {
+                self.features = f;
+                // `--disable-obex-services` must work for every backend, and
+                // must survive later feature refreshes from the worker thread.
+                if self.config.disable_obex_services {
+                    self.features.obex = false;
+                    self.features.send_file = false;
+                    self.features.receive_file = false;
+                }
+            }
             Event::Transfers(t) => self.transfers = t,
             Event::Player(p) => self.player = p,
             Event::Networks(n) => self.networks = n,
@@ -511,7 +651,7 @@ impl App {
             Quit => {
                 if self.config.confirm_on_quit {
                     self.confirm = Some(ConfirmState {
-                        text: "Quit bluetuith-rs?".into(),
+                        text: self.tr().msg_quit_confirm.into(),
                         action: ConfirmAction::Quit,
                     });
                     self.push(Overlay::Confirm);
@@ -520,6 +660,10 @@ impl App {
                 }
             }
             Menu => self.open_menu(),
+            MenuAdapter => self.open_menu_at(MenuId::Adapter),
+            MenuDevice => self.open_menu_at(MenuId::Device),
+            MenuView => self.open_menu_at(MenuId::View),
+            MenuHelp => self.open_menu_at(MenuId::Help),
             Help => self.push(Overlay::Help),
             Suspend => self.suspend_requested = true,
             Close => {
@@ -528,14 +672,20 @@ impl App {
                 } else if !self.filter.is_empty() {
                     self.filter.clear();
                 } else {
-                    self.set_status(Level::Info, "Ready", false);
+                    self.set_status(Level::Info, self.tr().msg_ready, false);
                 }
             }
             Cancel => {
-                if let Some(addr) = self.selected_addr() {
-                    self.dispatch(Command::CancelPairing(addr));
+                // Only a live pairing prompt needs a D-Bus CancelPairing;
+                // otherwise Ctrl+x is just a local "clear/escape" so it does
+                // not produce a spurious BlueZ error.
+                if self.auth.is_some() {
+                    if let Some(addr) = self.selected_addr() {
+                        self.dispatch(Command::CancelPairing(addr));
+                    }
                 }
-                self.set_status(Level::Info, "Cancelled", false);
+                self.filter.clear();
+                self.set_status(Level::Info, self.tr().msg_cancelled, false);
             }
             Switch => {
                 self.show_details = !self.show_details;
@@ -543,15 +693,15 @@ impl App {
             Power | Discoverable | Pairable => {
                 if let Some(ad) = self.current_adapter() {
                     let (property, value, label) = match a {
-                        Power => (AdapterProperty::Powered, !ad.powered, "Power"),
+                        Power => (AdapterProperty::Powered, !ad.powered, self.tr().power),
                         Discoverable => (
                             AdapterProperty::Discoverable,
                             !ad.discoverable,
-                            "Discoverable",
+                            self.tr().discoverable,
                         ),
-                        _ => (AdapterProperty::Pairable, !ad.pairable, "Pairable"),
+                        _ => (AdapterProperty::Pairable, !ad.pairable, self.tr().pairable),
                     };
-                    self.set_status(Level::Busy, format!("Setting {label}…"), true);
+                    self.set_status(Level::Busy, fill(self.tr().msg_setting, label), true);
                     self.dispatch(Command::SetAdapterProperty { property, value });
                 }
             }
@@ -569,9 +719,17 @@ impl App {
                     self.close_overlay();
                 }
                 self.show_player_bar = false;
+                self.dispatch(Command::HidePlayer);
             }
             PlayerShow => {
+                if !self.features.media_player {
+                    self.set_status(Level::Warning, self.tr().msg_unavailable, false);
+                    return;
+                }
                 self.show_player_bar = true;
+                if let Some(addr) = self.selected_addr() {
+                    self.dispatch(Command::ShowPlayer(addr));
+                }
                 self.push(Overlay::Player);
             }
             Connect => {
@@ -580,13 +738,13 @@ impl App {
                         (d.address.clone(), d.connected, d.display_name());
                     self.set_status(
                         Level::Busy,
-                        format!(
-                            "{} {name}…",
+                        fill(
                             if connected {
-                                "Disconnecting from"
+                                self.tr().msg_disconnecting
                             } else {
-                                "Connecting to"
-                            }
+                                self.tr().msg_connecting
+                            },
+                            name,
                         ),
                         true,
                     );
@@ -599,7 +757,7 @@ impl App {
             }
             Pair => {
                 if let Some(addr) = self.selected_addr() {
-                    self.set_status(Level::Busy, "Pairing…", true);
+                    self.set_status(Level::Busy, self.tr().msg_pairing, true);
                     self.dispatch(Command::PairDevice(addr));
                 }
             }
@@ -619,27 +777,41 @@ impl App {
             }
             SendFiles => {
                 if !self.features.send_file {
-                    self.set_status(
-                        Level::Warning,
-                        "File transfer is unavailable on this session",
-                        false,
-                    );
+                    self.set_status(Level::Warning, self.tr().msg_no_send, false);
                     return;
                 }
                 if self.selected_device().is_none() {
-                    self.set_status(Level::Warning, "Select a device first", false);
+                    self.set_status(Level::Warning, self.tr().msg_select_device, false);
                     return;
                 }
                 self.push(Overlay::FilePicker);
             }
-            Network => self.push(Overlay::Network),
-            AudioProfiles => self.push(Overlay::Profiles),
+            Network => {
+                if !self.features.network {
+                    self.set_status(Level::Warning, self.tr().msg_unavailable, false);
+                    return;
+                }
+                if let Some(addr) = self.selected_addr() {
+                    self.dispatch(Command::RefreshNetworks(addr));
+                }
+                self.push(Overlay::Network);
+            }
+            AudioProfiles => {
+                if !self.features.audio_profiles {
+                    self.set_status(Level::Warning, self.tr().msg_unavailable, false);
+                    return;
+                }
+                if let Some(addr) = self.selected_addr() {
+                    self.dispatch(Command::RefreshProfiles(addr));
+                }
+                self.push(Overlay::Profiles);
+            }
             Info => self.push(Overlay::DeviceInfo),
             Remove => {
                 if let Some(d) = self.selected_device() {
                     let (addr, name) = (d.address.clone(), d.display_name());
                     self.confirm = Some(ConfirmState {
-                        text: format!("Remove {name}?"),
+                        text: fill(self.tr().msg_remove_confirm, name),
                         action: ConfirmAction::RemoveDevice(addr),
                     });
                     self.push(Overlay::Confirm);
@@ -647,11 +819,7 @@ impl App {
             }
             Search => {
                 self.search_active = true;
-                self.set_status(
-                    Level::Info,
-                    "Search: type to filter, Enter to keep, Esc to clear",
-                    false,
-                );
+                self.set_status(Level::Info, self.tr().msg_search_hint, false);
             }
             CycleSort => {
                 let all = [
@@ -665,28 +833,60 @@ impl App {
                 let i = all.iter().position(|s| *s == self.sort).unwrap_or(0);
                 self.sort = all[(i + 1) % all.len()];
                 self.selected = 0;
-                self.set_status(Level::Info, format!("Sort by {:?}", self.sort), false);
+                self.set_status(
+                    Level::Info,
+                    format!("{}: {}", self.tr().h_sort, self.sort.label(self.lang)),
+                    false,
+                );
             }
             ThemePicker => self.push(Overlay::ThemePicker),
             ToggleDetails => self.show_details = !self.show_details,
             ShowLog => self.push(Overlay::Log),
             Refresh => {
                 self.dispatch(Command::Refresh);
-                self.set_status(Level::Info, "Refreshing…", false);
+                self.set_status(Level::Info, self.tr().msg_refreshing, false);
             }
             CommandPalette => self.push(Overlay::CommandPalette),
             About => self.push(Overlay::About),
-            _ => {}
+            Language => {
+                self.lang = match self.lang {
+                    Lang::En => Lang::Zh,
+                    Lang::Zh => Lang::En,
+                };
+                // Keep the in-memory config consistent with the live UI.
+                self.config.language = self.lang.code().to_string();
+                self.set_status(
+                    Level::Info,
+                    format!("{}: {}", self.tr().language, self.lang.name()),
+                    false,
+                );
+            }
+            // Window-scoped actions have no global effect on their own. Route
+            // them to the window where they apply, so the command palette
+            // never offers a command that appears to do nothing.
+            a => match a.context() {
+                Context::Files => self.do_action(SendFiles),
+                Context::Progress => self.push(Overlay::Progress),
+                Context::Player => self.do_action(PlayerShow),
+                _ => {}
+            },
         }
     }
 
     // ---- menus ------------------------------------------------------------
 
     pub fn open_menu(&mut self) {
-        self.menu_id = MenuId::Adapter;
+        self.open_menu_at(MenuId::Adapter);
+    }
+
+    /// Open (or switch) the menu overlay to a specific tab, e.g. via F1–F4.
+    pub fn open_menu_at(&mut self, id: MenuId) {
+        self.menu_id = id;
         self.menu_index = 0;
         self.rebuild_menu();
-        self.push(Overlay::Menu);
+        if self.top_overlay() != Some(Overlay::Menu) {
+            self.push(Overlay::Menu);
+        }
     }
 
     pub fn set_menu(&mut self, id: MenuId) {
@@ -705,6 +905,7 @@ impl App {
     }
 
     pub fn rebuild_menu(&mut self) {
+        let tr = self.tr();
         let d = self.selected_device();
         let ad = self.current_adapter();
         let mut items = Vec::new();
@@ -715,33 +916,37 @@ impl App {
                 let pair = ad.map(|a| a.pairable).unwrap_or(false);
                 let scan = ad.map(|a| a.discovering).unwrap_or(false);
                 items.push(self.item(
-                    format!("Power: {}", if p { "On" } else { "Off" }),
+                    format!("{}: {}", tr.power, if p { tr.on } else { tr.off }),
                     Action::Power,
-                    true,
+                    self.features.adapter,
                 ));
                 items.push(self.item(
-                    format!("Discoverable: {}", if disc { "On" } else { "Off" }),
+                    format!("{}: {}", tr.discoverable, if disc { tr.on } else { tr.off }),
                     Action::Discoverable,
-                    p,
+                    p && self.features.adapter,
                 ));
                 items.push(self.item(
-                    format!("Pairable: {}", if pair { "On" } else { "Off" }),
+                    format!("{}: {}", tr.pairable, if pair { tr.on } else { tr.off }),
                     Action::Pairable,
-                    p,
+                    p && self.features.adapter,
                 ));
                 items.push(self.item(
-                    if scan { "Stop Scan" } else { "Start Scan" },
+                    if scan { tr.stop_scan } else { tr.start_scan },
                     Action::Scan,
-                    p,
+                    p && self.features.adapter,
                 ));
-                items.push(self.item("Change Adapter…", Action::ChangeAdapter, true));
-                items.push(self.item("View Downloads…", Action::ProgressView, true));
                 items.push(self.item(
-                    "Hide Media Player",
+                    tr.change_adapter,
+                    Action::ChangeAdapter,
+                    self.features.adapter,
+                ));
+                items.push(self.item(tr.view_downloads, Action::ProgressView, true));
+                items.push(self.item(
+                    tr.hide_media_player,
                     Action::PlayerHide,
                     self.show_player_bar,
                 ));
-                items.push(self.item("Quit", Action::Quit, true));
+                items.push(self.item(tr.quit, Action::Quit, true));
             }
             MenuId::Device => {
                 let connected = d.map(|x| x.connected).unwrap_or(false);
@@ -762,60 +967,68 @@ impl App {
                 let has_avrcp = d
                     .map(|x| x.has_service("110c") || x.has_service("110e"))
                     .unwrap_or(false);
-                let any = d.is_some();
+                let any = d.is_some() && self.features.device;
                 items.push(self.item(
-                    if connected { "Disconnect" } else { "Connect" },
+                    if connected { tr.disconnect } else { tr.connect },
                     Action::Connect,
                     any,
                 ));
-                items.push(self.item("Pair", Action::Pair, any && !paired));
+                items.push(self.item(tr.pair, Action::Pair, any && !paired));
                 items.push(self.item(
-                    if trusted { "Untrust" } else { "Trust" },
+                    if trusted { tr.untrust } else { tr.trust },
                     Action::Trust,
                     any,
                 ));
                 items.push(self.item(
-                    if blocked { "Unblock" } else { "Block" },
+                    if blocked { tr.unblock } else { tr.block },
                     Action::Block,
                     any,
                 ));
                 items.push(self.item(
-                    "Send Files…",
+                    tr.send_files_menu,
                     Action::SendFiles,
                     any && self.features.send_file && has_obex,
                 ));
                 items.push(self.item(
-                    "Network Options…",
+                    tr.network_options,
                     Action::Network,
                     any && self.features.network && has_net,
                 ));
-                items.push(self.item("Audio Profiles…", Action::AudioProfiles, any && has_audio));
-                items.push(self.item("Show Media Player…", Action::PlayerShow, any && has_avrcp));
-                items.push(self.item("Device Info…", Action::Info, any));
-                items.push(self.item("Remove", Action::Remove, any));
+                items.push(self.item(
+                    tr.audio_profiles_menu,
+                    Action::AudioProfiles,
+                    any && has_audio && self.features.audio_profiles,
+                ));
+                items.push(self.item(
+                    tr.show_media_player,
+                    Action::PlayerShow,
+                    any && has_avrcp && self.features.media_player,
+                ));
+                items.push(self.item(tr.device_info_menu, Action::Info, any));
+                items.push(self.item(tr.remove, Action::Remove, any));
             }
             MenuId::View => {
-                items.push(self.item("Search / Filter", Action::Search, true));
-                items.push(self.item("Cycle Sort", Action::CycleSort, true));
+                items.push(self.item(tr.search_filter, Action::Search, true));
+                items.push(self.item(tr.cycle_sort, Action::CycleSort, true));
                 items.push(self.item(
                     if self.show_details {
-                        "Hide Details"
+                        tr.hide_details
                     } else {
-                        "Show Details"
+                        tr.show_details
                     },
                     Action::ToggleDetails,
                     true,
                 ));
-                items.push(self.item("Theme Picker…", Action::ThemePicker, true));
-                items.push(self.item("Event Log…", Action::ShowLog, true));
-                items.push(self.item("Media Player…", Action::PlayerShow, true));
-                items.push(self.item("Transfers…", Action::ProgressView, true));
-                items.push(self.item("Refresh", Action::Refresh, true));
-                items.push(self.item("Command Palette…", Action::CommandPalette, true));
+                items.push(self.item(tr.theme_picker_menu, Action::ThemePicker, true));
+                items.push(self.item(tr.event_log_menu, Action::ShowLog, true));
+                items.push(self.item(tr.media_player_menu, Action::PlayerShow, true));
+                items.push(self.item(tr.transfers_menu, Action::ProgressView, true));
+                items.push(self.item(tr.refresh, Action::Refresh, true));
+                items.push(self.item(tr.command_palette_menu, Action::CommandPalette, true));
             }
             MenuId::Help => {
-                items.push(self.item("Keybindings & Help", Action::Help, true));
-                items.push(self.item("About", Action::About, true));
+                items.push(self.item(tr.keybindings_help_menu, Action::Help, true));
+                items.push(self.item(tr.about_menu, Action::About, true));
             }
         }
         self.menu_items = items;
@@ -827,7 +1040,7 @@ impl App {
             return;
         };
         if !item.enabled {
-            self.set_status(Level::Warning, "That action is unavailable here", false);
+            self.set_status(Level::Warning, self.tr().msg_unavailable, false);
             return;
         }
         self.close_overlay();
@@ -849,15 +1062,33 @@ impl App {
             self.confirm_key(ev);
             return;
         }
-        // Quit is global, except in text-entry modes handled above.
-        if self.keys.is(&ev, Action::Quit) {
-            self.do_action(Action::Quit);
-            return;
-        }
+        // When an overlay is open it owns the keyboard: main-UI shortcuts must
+        // not fire underneath it. Esc/Close always dismisses the top overlay.
         if let Some(o) = self.top_overlay() {
+            // Command palette level 2: Esc steps back to the category list
+            // instead of closing the whole palette.
+            if o == Overlay::CommandPalette
+                && self.palette_stage == 1
+                && (matches!(ev.code, KeyCode::Esc) || self.keys.is(&ev, Action::Close))
+            {
+                self.palette_go_back();
+                return;
+            }
+            if self.keys.is(&ev, Action::Close) || matches!(ev.code, KeyCode::Esc) {
+                self.close_overlay();
+                return;
+            }
+            // `overlay_key` may itself handle Close for a specific view.
             if self.overlay_key(o, ev) {
                 return;
             }
+            // Swallow everything the overlay did not consume.
+            return;
+        }
+        // No overlay: quit and the global shortcuts.
+        if self.keys.is(&ev, Action::Quit) {
+            self.do_action(Action::Quit);
+            return;
         }
         // Global keys.
         if self.keys.is(&ev, Action::Help) {
@@ -867,6 +1098,17 @@ impl App {
         if self.keys.is(&ev, Action::Menu) {
             self.open_menu();
             return;
+        }
+        for a in [
+            Action::MenuAdapter,
+            Action::MenuDevice,
+            Action::MenuView,
+            Action::MenuHelp,
+        ] {
+            if self.keys.is(&ev, a) {
+                self.do_action(a);
+                return;
+            }
         }
         if self.keys.is(&ev, Action::Close) {
             self.do_action(Action::Close);
@@ -904,6 +1146,10 @@ impl App {
             self.do_action(Action::ShowLog);
             return;
         }
+        if self.keys.is(&ev, Action::About) {
+            self.do_action(Action::About);
+            return;
+        }
         if self.keys.is(&ev, Action::Refresh) {
             self.do_action(Action::Refresh);
             return;
@@ -912,33 +1158,42 @@ impl App {
             self.do_action(Action::CommandPalette);
             return;
         }
+        if self.keys.is(&ev, Action::Language) {
+            self.do_action(Action::Language);
+            return;
+        }
 
         self.main_key(ev);
     }
 
     fn search_key(&mut self, ev: KeyEvent) {
-        match ev.code {
-            KeyCode::Esc => {
-                self.search_active = false;
-                self.filter.clear();
-                self.set_status(Level::Info, "Filter cleared", false);
+        let tr = self.tr();
+        if self.keys.is(&ev, Action::Close) || matches!(ev.code, KeyCode::Esc) {
+            self.search_active = false;
+            self.filter.clear();
+            self.set_status(Level::Info, tr.msg_filter_cleared, false);
+        } else if self.keys.is(&ev, Action::Select) || matches!(ev.code, KeyCode::Enter) {
+            self.search_active = false;
+            self.set_status(Level::Info, fill(tr.msg_filter, &self.filter), false);
+        } else {
+            match ev.code {
+                KeyCode::Backspace => {
+                    self.filter.pop();
+                }
+                KeyCode::Char(c) => self.filter.push(c),
+                _ => {}
             }
-            KeyCode::Enter => {
-                self.search_active = false;
-                self.set_status(Level::Info, format!("Filter: {}", self.filter), false);
-            }
-            KeyCode::Backspace => {
-                self.filter.pop();
-            }
-            KeyCode::Char(c) => self.filter.push(c),
-            _ => {}
         }
         self.selected = 0;
     }
 
     fn confirm_key(&mut self, ev: KeyEvent) {
-        let yes = matches!(ev.code, KeyCode::Char('y' | 'Y') | KeyCode::Enter);
-        let no = matches!(ev.code, KeyCode::Char('n' | 'N') | KeyCode::Esc);
+        let yes = matches!(ev.code, KeyCode::Char('y' | 'Y'))
+            || self.keys.is(&ev, Action::Select)
+            || matches!(ev.code, KeyCode::Enter);
+        let no = matches!(ev.code, KeyCode::Char('n' | 'N'))
+            || self.keys.is(&ev, Action::Close)
+            || matches!(ev.code, KeyCode::Esc);
         if !yes && !no {
             return;
         }
@@ -947,7 +1202,16 @@ impl App {
         if yes {
             match action {
                 Some(ConfirmAction::Quit) => {
-                    self.dispatch(Command::SetScan(false));
+                    // Only stop an actually-running discovery; BlueZ returns
+                    // "No discovery started" otherwise, which would leave a
+                    // spurious error on the way out.
+                    if self
+                        .current_adapter()
+                        .map(|a| a.discovering)
+                        .unwrap_or(false)
+                    {
+                        self.dispatch(Command::SetScan(false));
+                    }
                     self.running = false;
                 }
                 Some(ConfirmAction::RemoveDevice(addr)) => {
@@ -956,43 +1220,50 @@ impl App {
                 None => {}
             }
         } else {
-            self.set_status(Level::Info, "Cancelled", false);
+            self.set_status(Level::Info, self.tr().msg_cancelled, false);
         }
     }
 
     fn auth_key(&mut self, ev: KeyEvent) {
-        let Some(req) = self.auth.clone() else { return };
+        let Some(req) = self.auth.clone() else {
+            return;
+        };
         let needs_text = matches!(req.kind, AuthKind::PinCode | AuthKind::Passkey(_));
+        let close = self.keys.is(&ev, Action::Close) || matches!(ev.code, KeyCode::Esc);
+        let accept = self.keys.is(&ev, Action::Select) || matches!(ev.code, KeyCode::Enter);
+
+        if close {
+            self.dispatch(Command::RespondAuth {
+                id: req.id,
+                response: AuthResponse::Reject,
+            });
+            self.auth = None;
+            self.close_overlay();
+            return;
+        }
+        if accept {
+            let response = if needs_text {
+                match req.kind {
+                    AuthKind::PinCode => AuthResponse::PinCode(self.auth_input.clone()),
+                    AuthKind::Passkey(_) => self
+                        .auth_input
+                        .parse()
+                        .map(AuthResponse::Passkey)
+                        .unwrap_or(AuthResponse::Reject),
+                    _ => AuthResponse::Accept,
+                }
+            } else {
+                AuthResponse::Accept
+            };
+            self.dispatch(Command::RespondAuth {
+                id: req.id,
+                response,
+            });
+            self.auth = None;
+            self.close_overlay();
+            return;
+        }
         match ev.code {
-            KeyCode::Esc => {
-                self.dispatch(Command::RespondAuth {
-                    id: req.id,
-                    response: AuthResponse::Reject,
-                });
-                self.auth = None;
-                self.close_overlay();
-            }
-            KeyCode::Enter => {
-                let response = if needs_text {
-                    match req.kind {
-                        AuthKind::PinCode => AuthResponse::PinCode(self.auth_input.clone()),
-                        AuthKind::Passkey(_) => self
-                            .auth_input
-                            .parse()
-                            .map(AuthResponse::Passkey)
-                            .unwrap_or(AuthResponse::Reject),
-                        _ => AuthResponse::Accept,
-                    }
-                } else {
-                    AuthResponse::Accept
-                };
-                self.dispatch(Command::RespondAuth {
-                    id: req.id,
-                    response,
-                });
-                self.auth = None;
-                self.close_overlay();
-            }
             KeyCode::Backspace => {
                 self.auth_input.pop();
             }
@@ -1012,9 +1283,15 @@ impl App {
                 Overlay::AdapterChange => app.adapters.len(),
                 Overlay::ThemePicker => Theme::name_list().len(),
                 Overlay::Profiles => app.profiles.len(),
-                Overlay::Network => app.networks.len().max(3),
+                Overlay::Network => 3, // exactly three selectable roles (PANU/NAP/DUN)
                 Overlay::Progress => app.transfers.len(),
-                Overlay::CommandPalette => app.palette_items.len(),
+                Overlay::CommandPalette => {
+                    if app.palette_stage == 0 {
+                        app.palette_categories.len()
+                    } else {
+                        app.palette_items.len()
+                    }
+                }
                 Overlay::FilePicker => app
                     .file_picker
                     .as_ref()
@@ -1026,14 +1303,40 @@ impl App {
         };
 
         if o == Overlay::Menu {
+            // F1–F4 switch directly between menu tabs.
+            for (a, id) in [
+                (Action::MenuAdapter, MenuId::Adapter),
+                (Action::MenuDevice, MenuId::Device),
+                (Action::MenuView, MenuId::View),
+                (Action::MenuHelp, MenuId::Help),
+            ] {
+                if self.keys.is(&ev, a) {
+                    self.set_menu(id);
+                    return true;
+                }
+            }
+            let len = self.menu_items.len();
+            // Confirm follows the Select binding (Enter by default); Space is
+            // kept as a convenience for menu activation.
+            if self.keys.is(&ev, Action::Select) || matches!(ev.code, KeyCode::Char(' ')) {
+                self.menu_select();
+                return true;
+            }
             match ev.code {
                 KeyCode::Up => {
-                    self.menu_index = self.menu_index.saturating_sub(1);
+                    self.menu_index = if self.menu_index == 0 {
+                        len.saturating_sub(1)
+                    } else {
+                        self.menu_index - 1
+                    };
                     return true;
                 }
                 KeyCode::Down => {
-                    self.menu_index =
-                        (self.menu_index + 1).min(self.menu_items.len().saturating_sub(1));
+                    self.menu_index = if self.menu_index + 1 >= len {
+                        0
+                    } else {
+                        self.menu_index + 1
+                    };
                     return true;
                 }
                 KeyCode::Right | KeyCode::Tab => {
@@ -1044,25 +1347,28 @@ impl App {
                     self.set_menu(MenuId::from_index((self.menu_id.index() + 3) % 4));
                     return true;
                 }
-                KeyCode::Enter | KeyCode::Char(' ') => {
-                    self.menu_select();
-                    return true;
-                }
                 _ => {}
             }
-            // Shortcut letters inside a menu (bluetuith behaviour).
-            if let KeyCode::Char(c) = ev.code {
-                if let Some(i) = self
-                    .menu_items
-                    .iter()
-                    .position(|it| self.keys.get(it.action).code == KeyCode::Char(c) && it.enabled)
-                {
-                    self.menu_index = i;
-                    self.menu_select();
-                    return true;
-                }
+            // Shortcut keys inside a menu (modifier- and case-aware).
+            if let Some(i) = self
+                .menu_items
+                .iter()
+                .position(|it| it.enabled && self.keys.is(&ev, it.action))
+            {
+                self.menu_index = i;
+                self.menu_select();
+                return true;
             }
             return false;
+        }
+
+        // The file picker keeps its own cursor (`fp.index`) and key handling.
+        if o == Overlay::FilePicker {
+            return self.file_picker_key(ev);
+        }
+        // The command palette has two levels (categories → actions).
+        if o == Overlay::CommandPalette {
+            return self.command_palette_key(ev);
         }
 
         // Generic navigation for list-like overlays.
@@ -1081,9 +1387,15 @@ impl App {
                 };
             } else if count > 0 {
                 self.overlay_index = if up {
-                    self.overlay_index.saturating_sub(1)
+                    if self.overlay_index == 0 {
+                        count - 1
+                    } else {
+                        self.overlay_index - 1
+                    }
+                } else if self.overlay_index + 1 >= count {
+                    0
                 } else {
-                    (self.overlay_index + 1).min(count - 1)
+                    self.overlay_index + 1
                 };
             }
             return true;
@@ -1101,7 +1413,7 @@ impl App {
 
         match o {
             Overlay::AdapterChange => {
-                if matches!(ev.code, KeyCode::Enter) {
+                if self.keys.is(&ev, Action::Select) {
                     if let Some(a) = self.adapters.get(self.overlay_index).cloned() {
                         self.dispatch(Command::SelectAdapter(a.path));
                         self.selected_adapter = self.overlay_index;
@@ -1111,21 +1423,28 @@ impl App {
                 }
             }
             Overlay::ThemePicker => {
-                if matches!(ev.code, KeyCode::Enter) {
+                if self.keys.is(&ev, Action::Select) {
                     let names = Theme::name_list();
                     if let Some(name) = names.get(self.overlay_index) {
                         self.config.theme = name.to_string();
                         let mut t = Theme::by_name(name).unwrap_or_else(Theme::midnight);
                         self.config.apply_accent(&mut t);
                         self.theme = t;
-                        self.set_status(Level::Success, format!("Theme: {name}"), false);
+                        self.set_status(Level::Success, fill(self.tr().msg_theme, name), false);
                     }
                     self.close_overlay();
                     return true;
                 }
             }
             Overlay::Profiles => {
-                if matches!(ev.code, KeyCode::Enter | KeyCode::Char(' ')) {
+                if self.keys.is(&ev, Action::Select) {
+                    // BlueZ does not own A2DP/HFP switching; only the demo
+                    // backend can actually toggle a profile. On real hardware
+                    // say so instead of faking a switch.
+                    if !self.audio_profiles_writable() {
+                        self.set_status(Level::Warning, self.tr().msg_profile_hint, false);
+                        return true;
+                    }
                     if let Some(p) = self.profiles.get(self.overlay_index).cloned() {
                         self.dispatch(Command::SetAudioProfile {
                             device: p.device,
@@ -1136,9 +1455,9 @@ impl App {
                 }
             }
             Overlay::Network => {
-                if matches!(ev.code, KeyCode::Enter | KeyCode::Char('c')) {
+                let roles = [NetworkRole::Panu, NetworkRole::Nap, NetworkRole::Dun];
+                if self.keys.is(&ev, Action::Select) || self.keys.is(&ev, Action::Connect) {
                     if let Some(addr) = self.selected_addr() {
-                        let roles = [NetworkRole::Panu, NetworkRole::Nap, NetworkRole::Dun];
                         let role = roles
                             .get(self.overlay_index)
                             .copied()
@@ -1147,14 +1466,24 @@ impl App {
                     }
                     return true;
                 }
-                if matches!(ev.code, KeyCode::Char('d')) {
-                    if let Some(nw) = self.networks.get(self.overlay_index).cloned() {
-                        self.dispatch(Command::DisconnectNetwork(nw.id));
+                if self.keys.is(&ev, Action::Remove) {
+                    // The highlighted row is a role; disconnect the active
+                    // connection for that role (the list is indexed by id,
+                    // not by row, so a direct index would be wrong).
+                    if let Some(role) = roles.get(self.overlay_index).copied() {
+                        if let Some(id) = network_id_for_role(&self.networks, role) {
+                            self.dispatch(Command::DisconnectNetwork(id));
+                        }
                     }
                     return true;
                 }
             }
             Overlay::Progress => {
+                // Closing must work even when the transfer list is empty.
+                if self.keys.is(&ev, Action::ProgressView) {
+                    self.close_overlay();
+                    return true;
+                }
                 let Some(t) = self.transfers.get(self.overlay_index).cloned() else {
                     return false;
                 };
@@ -1170,10 +1499,6 @@ impl App {
                     self.dispatch(Command::CancelTransfer(t.id));
                     return true;
                 }
-                if self.keys.is(&ev, Action::ProgressView) {
-                    self.close_overlay();
-                    return true;
-                }
             }
             Overlay::Player => {
                 let map = [
@@ -1185,6 +1510,8 @@ impl App {
                     (Action::PlayerStop, PlayerCommand::Stop),
                     (Action::PlayerVolumeUp, PlayerCommand::VolumeUp),
                     (Action::PlayerVolumeDown, PlayerCommand::VolumeDown),
+                    (Action::PlayerShuffle, PlayerCommand::ToggleShuffle),
+                    (Action::PlayerRepeat, PlayerCommand::CycleRepeat),
                 ];
                 for (a, c) in map {
                     if self.keys.is(&ev, a) {
@@ -1193,38 +1520,19 @@ impl App {
                     }
                 }
                 if self.keys.is(&ev, Action::PlayerHide) {
-                    self.close_overlay();
+                    self.do_action(Action::PlayerHide);
                     return true;
                 }
             }
             Overlay::FilePicker => {
                 return self.file_picker_key(ev);
             }
-            Overlay::CommandPalette => match ev.code {
-                KeyCode::Enter => {
-                    if let Some(a) = self.palette_items.get(self.overlay_index).copied() {
-                        self.close_overlay();
-                        self.do_action(a);
-                    }
-                    return true;
-                }
-                KeyCode::Backspace => {
-                    self.palette_query.pop();
-                    self.rebuild_palette();
-                    return true;
-                }
-                KeyCode::Char(c) => {
-                    self.palette_query.push(c);
-                    self.rebuild_palette();
-                    return true;
-                }
-                _ => {}
-            },
-            Overlay::Help | Overlay::Log | Overlay::DeviceInfo | Overlay::About => {
-                if matches!(ev.code, KeyCode::Enter | KeyCode::Char('q')) {
-                    self.close_overlay();
-                    return true;
-                }
+            // Enter or the quit key just dismisses an info window.
+            Overlay::Help | Overlay::Log | Overlay::DeviceInfo | Overlay::About
+                if self.keys.is(&ev, Action::Select) || self.keys.is(&ev, Action::Quit) =>
+            {
+                self.close_overlay();
+                return true;
             }
             _ => {}
         }
@@ -1236,85 +1544,65 @@ impl App {
             return false;
         };
         let entry = fp.entries.get(fp.index).cloned();
-        match ev.code {
-            KeyCode::Up => {
-                fp.index = fp.index.saturating_sub(1);
+        if self.keys.is(&ev, Action::NavigateUp) {
+            let n = fp.entries.len();
+            if n > 0 {
+                fp.index = if fp.index == 0 { n - 1 } else { fp.index - 1 };
             }
-            KeyCode::Down => {
-                fp.index = (fp.index + 1).min(fp.entries.len().saturating_sub(1));
+        } else if self.keys.is(&ev, Action::NavigateDown) {
+            let n = fp.entries.len();
+            if n > 0 {
+                fp.index = if fp.index + 1 >= n { 0 } else { fp.index + 1 };
             }
-            KeyCode::Right => {
-                if let Some(e) = &entry {
-                    if e.is_dir() {
-                        fp.cwd = e.clone();
-                        fp.index = 0;
-                        fp.refresh();
-                    }
-                }
-            }
-            KeyCode::Left => {
-                if let Some(parent) = fp.cwd.parent().map(|p| p.to_path_buf()) {
-                    fp.cwd = parent;
+        } else if self.keys.is(&ev, Action::FileDirForward) {
+            if let Some(e) = &entry {
+                if e.is_dir() {
+                    fp.cwd = e.clone();
                     fp.index = 0;
                     fp.refresh();
                 }
             }
-            KeyCode::Char(' ') => {
-                if let Some(e) = &entry {
-                    if !fp.selected.insert(e.clone()) {
-                        fp.selected.remove(e);
-                    }
-                }
-            }
-            KeyCode::Char('a') => {
-                for e in &fp.entries {
-                    if !fp.selected.insert(e.clone()) {
-                        fp.selected.remove(e);
-                    }
-                }
-            }
-            KeyCode::Char('A') => {
-                fp.selected = fp.entries.iter().cloned().collect();
-            }
-            KeyCode::Char('h')
-                if ev
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
-            {
-                fp.show_hidden = !fp.show_hidden;
+        } else if self.keys.is(&ev, Action::FileDirBack) {
+            if let Some(parent) = fp.cwd.parent().map(|p| p.to_path_buf()) {
+                fp.cwd = parent;
+                fp.index = 0;
                 fp.refresh();
             }
-            KeyCode::Char('r')
-                if ev
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
-            {
-                fp.refresh();
-            }
-            KeyCode::Char('s')
-                if ev
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
-            {
-                let files: Vec<PathBuf> = fp.selected.iter().cloned().collect();
-                if files.is_empty() {
-                    self.set_status(Level::Warning, "No files selected", false);
-                } else {
-                    self.dispatch(Command::SendFiles {
-                        device: fp.device.clone(),
-                        files: files.clone(),
-                    });
-                    self.set_status(
-                        Level::Busy,
-                        format!("Sending {} file(s)…", files.len()),
-                        true,
-                    );
-                    self.close_overlay();
-                    self.file_picker = None;
-                    return true;
+        } else if self.keys.is(&ev, Action::FileSelect) {
+            if let Some(e) = &entry {
+                if !fp.selected.insert(e.clone()) {
+                    fp.selected.remove(e);
                 }
             }
-            _ => return false,
+        } else if self.keys.is(&ev, Action::FileInvertSelection) {
+            for e in &fp.entries {
+                if !fp.selected.insert(e.clone()) {
+                    fp.selected.remove(e);
+                }
+            }
+        } else if self.keys.is(&ev, Action::FileSelectAll) {
+            fp.selected = fp.entries.iter().cloned().collect();
+        } else if self.keys.is(&ev, Action::FileToggleHidden) {
+            fp.show_hidden = !fp.show_hidden;
+            fp.refresh();
+        } else if self.keys.is(&ev, Action::FileRefresh) {
+            fp.refresh();
+        } else if self.keys.is(&ev, Action::FileConfirmSelection) {
+            let files: Vec<PathBuf> = fp.selected.iter().cloned().collect();
+            if files.is_empty() {
+                self.set_status(Level::Warning, self.tr().msg_no_files, false);
+            } else {
+                self.dispatch(Command::SendFiles {
+                    device: fp.device.clone(),
+                    files: files.clone(),
+                });
+                self.set_status(Level::Busy, fill(self.tr().msg_sending, files.len()), true);
+                self.close_overlay();
+                self.file_picker = None;
+                return true;
+            }
+        } else {
+            return false;
         }
         self.file_picker = Some(fp);
         true
@@ -1324,11 +1612,25 @@ impl App {
         // Navigation
         let visible = self.visible_devices().len();
         if self.keys.is(&ev, Action::NavigateUp) {
-            self.selected = self.selected.saturating_sub(1);
+            if visible == 0 {
+                return;
+            }
+            self.selected = if self.selected == 0 {
+                visible - 1
+            } else {
+                self.selected - 1
+            };
             return;
         }
         if self.keys.is(&ev, Action::NavigateDown) {
-            self.selected = (self.selected + 1).min(visible.saturating_sub(1));
+            if visible == 0 {
+                return;
+            }
+            self.selected = if self.selected + 1 >= visible {
+                0
+            } else {
+                self.selected + 1
+            };
             return;
         }
         if self.keys.is(&ev, Action::NavigateTop) {
@@ -1369,26 +1671,306 @@ impl App {
         }
     }
 
+    /// Two-level command palette: categories (stage 0) → actions (stage 1).
+    fn command_palette_key(&mut self, ev: KeyEvent) -> bool {
+        let stage0 = self.palette_stage == 0;
+        // Confirm honours the Select binding (Enter by default). Raw Enter is
+        // also accepted because mouse activation synthesises an Enter event.
+        if self.keys.is(&ev, Action::Select) || matches!(ev.code, KeyCode::Enter) {
+            if stage0 {
+                if let Some(cat) = self.palette_categories.get(self.overlay_index).copied() {
+                    self.palette_category = Some(cat);
+                    self.palette_stage = 1;
+                    self.palette_query.clear();
+                    self.overlay_index = 0;
+                    self.rebuild_palette();
+                }
+            } else if let Some(a) = self.palette_items.get(self.overlay_index).copied() {
+                self.close_overlay();
+                self.do_action(a);
+            }
+            return true;
+        }
+        match ev.code {
+            KeyCode::Up | KeyCode::Down => {
+                let n = if stage0 {
+                    self.palette_categories.len()
+                } else {
+                    self.palette_items.len()
+                };
+                if n == 0 {
+                    return true;
+                }
+                let up = matches!(ev.code, KeyCode::Up);
+                self.overlay_index = if up {
+                    if self.overlay_index == 0 {
+                        n - 1
+                    } else {
+                        self.overlay_index - 1
+                    }
+                } else if self.overlay_index + 1 >= n {
+                    0
+                } else {
+                    self.overlay_index + 1
+                };
+                true
+            }
+            KeyCode::Backspace => {
+                if !stage0 && self.palette_query.is_empty() {
+                    self.palette_go_back();
+                } else {
+                    self.palette_query.pop();
+                    self.rebuild_palette();
+                }
+                true
+            }
+            KeyCode::Char(c) => {
+                self.palette_query.push(c);
+                self.rebuild_palette();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Leave the action level and return to the category list.
+    pub fn palette_go_back(&mut self) {
+        self.palette_stage = 0;
+        self.palette_category = None;
+        self.palette_query.clear();
+        self.overlay_index = 0;
+        self.rebuild_palette();
+    }
+
+    /// Number of selectable items in a list-like overlay.
+    fn overlay_len(&self, o: Overlay) -> usize {
+        match o {
+            Overlay::Menu => self.menu_items.len(),
+            Overlay::AdapterChange => self.adapters.len(),
+            Overlay::ThemePicker => Theme::name_list().len(),
+            Overlay::Profiles => self.profiles.len(),
+            Overlay::Network => 3,
+            Overlay::Progress => self.transfers.len(),
+            Overlay::CommandPalette => {
+                if self.palette_stage == 0 {
+                    self.palette_categories.len()
+                } else {
+                    self.palette_items.len()
+                }
+            }
+            Overlay::FilePicker => self
+                .file_picker
+                .as_ref()
+                .map(|f| f.entries.len())
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    /// Scroll the open overlay (wheel events), never the list underneath.
+    fn scroll_overlay(&mut self, o: Overlay, up: bool) {
+        if matches!(
+            o,
+            Overlay::Help | Overlay::Log | Overlay::DeviceInfo | Overlay::About
+        ) {
+            self.overlay_scroll = if up {
+                self.overlay_scroll.saturating_sub(1)
+            } else {
+                self.overlay_scroll.saturating_add(1)
+            };
+            return;
+        }
+        if o == Overlay::FilePicker {
+            if let Some(fp) = self.file_picker.as_mut() {
+                let n = fp.entries.len();
+                if n > 0 {
+                    fp.index = if up {
+                        if fp.index == 0 {
+                            n - 1
+                        } else {
+                            fp.index - 1
+                        }
+                    } else if fp.index + 1 >= n {
+                        0
+                    } else {
+                        fp.index + 1
+                    };
+                }
+            }
+            return;
+        }
+        if o == Overlay::Menu {
+            let n = self.menu_items.len();
+            if n > 0 {
+                self.menu_index = if up {
+                    if self.menu_index == 0 {
+                        n - 1
+                    } else {
+                        self.menu_index - 1
+                    }
+                } else if self.menu_index + 1 >= n {
+                    0
+                } else {
+                    self.menu_index + 1
+                };
+            }
+            return;
+        }
+        let n = self.overlay_len(o);
+        if n > 0 {
+            self.overlay_index = if up {
+                if self.overlay_index == 0 {
+                    n - 1
+                } else {
+                    self.overlay_index - 1
+                }
+            } else if self.overlay_index + 1 >= n {
+                0
+            } else {
+                self.overlay_index + 1
+            };
+        }
+    }
+
+    /// Activate (or select) a row inside the top overlay on left click.
+    fn overlay_item_click(&mut self, o: Overlay, idx: usize) {
+        let now = Instant::now();
+        let double = self
+            .last_overlay_click
+            .map(|(t, i)| i == idx && t.elapsed().as_millis() < 400)
+            .unwrap_or(false);
+        self.last_overlay_click = Some((now, idx));
+
+        match o {
+            // Menus act on a single click (standard menu behaviour).
+            Overlay::Menu => {
+                self.menu_index = idx;
+                self.menu_select();
+            }
+            // The command palette is a launcher: a click activates the row.
+            Overlay::CommandPalette => {
+                self.overlay_index = idx;
+                let _ = self.overlay_key(o, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            }
+            // File picker: click selects, double-click enters a folder or
+            // toggles a file's checkbox.
+            Overlay::FilePicker => {
+                if let Some(fp) = self.file_picker.as_mut() {
+                    fp.index = idx;
+                }
+                if double {
+                    self.file_picker_activate(idx);
+                }
+            }
+            // Other lists: click selects, double-click activates.
+            _ => {
+                self.overlay_index = idx;
+                if double {
+                    let _ = self.overlay_key(o, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                }
+            }
+        }
+    }
+
+    fn file_picker_activate(&mut self, idx: usize) {
+        let Some(mut fp) = self.file_picker.clone() else {
+            return;
+        };
+        let Some(entry) = fp.entries.get(idx).cloned() else {
+            return;
+        };
+        if entry.is_dir() {
+            fp.cwd = entry;
+            fp.index = 0;
+            fp.refresh();
+        } else if !fp.selected.insert(entry.clone()) {
+            fp.selected.remove(&entry);
+        }
+        self.file_picker = Some(fp);
+    }
+
     // ---- mouse ------------------------------------------------------------
 
     pub fn on_mouse(&mut self, ev: MouseEvent) {
         let (x, y) = (ev.column, ev.row);
         match ev.kind {
             MouseEventKind::ScrollUp => {
-                self.selected = self.selected.saturating_sub(1);
+                if let Some(o) = self.top_overlay() {
+                    self.scroll_overlay(o, true);
+                    return;
+                }
+                let n = self.visible_devices().len();
+                if n > 0 {
+                    self.selected = if self.selected == 0 {
+                        n - 1
+                    } else {
+                        self.selected - 1
+                    };
+                }
             }
             MouseEventKind::ScrollDown => {
-                self.selected =
-                    (self.selected + 1).min(self.visible_devices().len().saturating_sub(1));
+                if let Some(o) = self.top_overlay() {
+                    self.scroll_overlay(o, false);
+                    return;
+                }
+                let n = self.visible_devices().len();
+                if n > 0 {
+                    self.selected = if self.selected + 1 >= n {
+                        0
+                    } else {
+                        self.selected + 1
+                    };
+                }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                // Menu bar
-                for (i, r) in self.layout.menu_rects.iter().enumerate() {
+                // The top menu bar is live when nothing (or only a menu) is
+                // open. Never let it cover a confirmation / pairing dialog.
+                if self.top_overlay().is_none_or(|o| o == Overlay::Menu) {
+                    for (i, r) in self.layout.menu_rects.iter().enumerate() {
+                        if x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height {
+                            self.open_menu_at(MenuId::from_index(i));
+                            return;
+                        }
+                    }
+                }
+                // While an overlay is open it owns the mouse.
+                if let Some(o) = self.top_overlay() {
+                    let inside = match self.layout.overlay_rect {
+                        Some(r) => x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height,
+                        // Not drawn yet: don't treat the click as "outside".
+                        None => true,
+                    };
+                    if !inside {
+                        match o {
+                            // Keep the pairing prompt modal to avoid an
+                            // accidental reject; everything else dismisses.
+                            Overlay::Auth => {}
+                            Overlay::Confirm => {
+                                self.confirm_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                            }
+                            _ => self.close_overlay(),
+                        }
+                        return;
+                    }
+                    let hit = self
+                        .layout
+                        .overlay_items
+                        .iter()
+                        .find(|(r, _)| {
+                            x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+                        })
+                        .map(|(_, i)| *i);
+                    if let Some(idx) = hit {
+                        self.overlay_item_click(o, idx);
+                    }
+                    return;
+                }
+                // Bottom hint strip: clicking a hint runs its action (this is
+                // how windows like Info/Transfers/Help can be opened by mouse).
+                for (r, a) in &self.layout.help_rects {
                     if x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height {
-                        self.menu_id = MenuId::from_index(i);
-                        self.menu_index = 0;
-                        self.rebuild_menu();
-                        self.push(Overlay::Menu);
+                        let action = *a;
+                        self.do_action(action);
                         return;
                     }
                 }
@@ -1411,6 +1993,11 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Right) => {
+                // A modal overlay owns the mouse; right-clicking behind it
+                // must not replace it with the device context menu.
+                if self.top_overlay().is_some() {
+                    return;
+                }
                 let r = self.layout.device_rows;
                 if x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height {
                     let idx = self.layout.device_scroll + (y - r.y) as usize;
@@ -1447,5 +2034,42 @@ impl App {
             Level::Warning => self.theme.warning,
             Level::Error => self.theme.error,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn network_disconnect_targets_the_selected_role() {
+        let networks = vec![
+            Network {
+                id: 7,
+                role: NetworkRole::Panu,
+                connected: true,
+                ..Default::default()
+            },
+            Network {
+                id: 42,
+                role: NetworkRole::Nap,
+                connected: true,
+                ..Default::default()
+            },
+        ];
+        // Row 1 is NAP, so it must select id 42, not networks[1] by index
+        // coincidence nor the first connection.
+        assert_eq!(network_id_for_role(&networks, NetworkRole::Nap), Some(42));
+        assert_eq!(network_id_for_role(&networks, NetworkRole::Dun), None);
+    }
+
+    #[test]
+    fn local_keys_are_excluded_from_the_palette() {
+        assert!(is_palette_excluded(Action::NavigateUp));
+        assert!(is_palette_excluded(Action::Select));
+        assert!(is_palette_excluded(Action::Suspend));
+        assert!(is_palette_excluded(Action::Close));
+        assert!(!is_palette_excluded(Action::Connect));
+        assert!(!is_palette_excluded(Action::About));
     }
 }

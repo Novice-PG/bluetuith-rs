@@ -7,11 +7,12 @@ _bluetuith_rs() {
           -m --gsm-apn -b --gsm-number -s --adapter-states -t --connect-bdaddr
           -w --no-warning -i --no-help-display -c --confirm-on-quit
           --no-confirm-on-quit -o --disable-obex-services --show-hidden-files
-          --scan-on-start --theme --accent --default-sort --config --demo
-          -h --help -V --version"
+          --scan-on-start --theme --accent --default-sort --lang --language
+          --config --demo -h --help -V --version"
     case "$prev" in
         --theme) COMPREPLY=( $(compgen -W 'Midnight Nord Catppuccin Dracula Gruvbox "Tokyo Night" "Rosé Pine" Solarized Daylight' -- "$cur") ); return 0 ;;
         --default-sort) COMPREPLY=( $(compgen -W 'Name Address Rssi Battery State Kind' -- "$cur") ); return 0 ;;
+        --lang|--language) COMPREPLY=( $(compgen -W 'en zh' -- "$cur") ); return 0 ;;
         --config|-a|-r|-m|-b|-s|-t) COMPREPLY=( $(compgen -f -- "$cur") ); return 0 ;;
     esac
     COMPREPLY=( $(compgen -W "$opts" -- "$cur") )

@@ -1,7 +1,11 @@
 bluetuith-rs (0.1.0-1) unstable; urgency=medium
 
-  * Initial release: clean-room Rust/ratatui reimplementation of the
-    bluetuith feature set plus search, sorting, themes and a demo backend.
+  * Initial release: clean-room Rust/ratatui reimplementation of bluetuith.
+  * Adapter/device control, pairing agent, OBEX Object Push send and receive
+    (via org.bluez.obex.Agent1, receive-dir), AVRCP playback including
+    shuffle/repeat, PAN networking (PANU/NAP), audio profile views.
+  * Search/filter, six sort modes, battery/RSSI, details panel, nine colour
+    themes, command palette, event log, bilingual UI (en/zh), --demo backend.
   * Static binaries and .deb packages for all Linux architectures.
 
- -- bluetuith-rs contributors <bluetuith-rs@users.noreply.github.com>  Wed, 04 Nov 2026 00:00:00 +0000
+ -- bluetuith-rs contributors <bluetuith-rs@users.noreply.github.com>  Sat, 15 Nov 2026 00:00:00 +0000

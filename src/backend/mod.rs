@@ -119,43 +119,163 @@ pub trait Backend: Send {
     fn dispatch(&mut self, cmd: Command);
     /// Called once per UI tick; returns everything that happened since.
     fn drain(&mut self) -> Vec<Event>;
-    fn features(&self) -> FeatureSet;
     fn label(&self) -> &'static str;
     fn is_demo(&self) -> bool;
 }
 
 /// A short human-readable UUID -> service name map for the UI.
-pub fn service_name(uuid: &str) -> &'static str {
+pub fn service_name(uuid: &str, lang: crate::i18n::Lang) -> &'static str {
+    use crate::i18n::Lang;
     let u = uuid.to_ascii_lowercase();
     let short = if u.len() == 36 {
         &u[4..8]
     } else {
         u.trim_start_matches("0x")
     };
+    let zh = lang == Lang::Zh;
     match short {
-        "1101" => "Serial Port",
-        "1103" => "Dial-up Networking",
-        "1105" => "OBEX Object Push",
-        "1106" => "OBEX File Transfer",
-        "1108" => "Headset",
-        "110a" => "Audio Source",
-        "110b" => "Audio Sink",
-        "110c" => "A/V Remote Target",
-        "110d" => "Advanced Audio",
-        "110e" => "A/V Remote Control",
-        "1112" => "Headset Audio Gateway",
+        "1101" => {
+            if zh {
+                "串口"
+            } else {
+                "Serial Port"
+            }
+        }
+        "1103" => {
+            if zh {
+                "拨号网络"
+            } else {
+                "Dial-up Networking"
+            }
+        }
+        "1105" => {
+            if zh {
+                "OBEX 对象推送"
+            } else {
+                "OBEX Object Push"
+            }
+        }
+        "1106" => {
+            if zh {
+                "OBEX 文件传输"
+            } else {
+                "OBEX File Transfer"
+            }
+        }
+        "1108" => {
+            if zh {
+                "耳机"
+            } else {
+                "Headset"
+            }
+        }
+        "110a" => {
+            if zh {
+                "音频源"
+            } else {
+                "Audio Source"
+            }
+        }
+        "110b" => {
+            if zh {
+                "音频接收"
+            } else {
+                "Audio Sink"
+            }
+        }
+        "110c" => {
+            if zh {
+                "A/V 远程目标"
+            } else {
+                "A/V Remote Target"
+            }
+        }
+        "110d" => {
+            if zh {
+                "高级音频"
+            } else {
+                "Advanced Audio"
+            }
+        }
+        "110e" => {
+            if zh {
+                "A/V 遥控"
+            } else {
+                "A/V Remote Control"
+            }
+        }
+        "1112" => {
+            if zh {
+                "耳机音频网关"
+            } else {
+                "Headset Audio Gateway"
+            }
+        }
         "1115" => "PANU",
         "1116" => "NAP",
         "1117" => "GN",
-        "111e" => "Handsfree",
-        "111f" => "Handsfree Audio Gateway",
-        "1124" => "Human Interface Device",
-        "1200" => "PnP Information",
-        "1800" => "Generic Access",
-        "1801" => "Generic Attribute",
-        "180a" => "Device Information",
-        "180f" => "Battery Service",
-        "1812" => "Human Interface Device",
-        _ => "Unknown service",
+        "111e" => {
+            if zh {
+                "免提"
+            } else {
+                "Handsfree"
+            }
+        }
+        "111f" => {
+            if zh {
+                "免提音频网关"
+            } else {
+                "Handsfree Audio Gateway"
+            }
+        }
+        "1124" | "1812" => {
+            if zh {
+                "人机接口设备"
+            } else {
+                "Human Interface Device"
+            }
+        }
+        "1200" => {
+            if zh {
+                "即插即用信息"
+            } else {
+                "PnP Information"
+            }
+        }
+        "1800" => {
+            if zh {
+                "通用访问"
+            } else {
+                "Generic Access"
+            }
+        }
+        "1801" => {
+            if zh {
+                "通用属性"
+            } else {
+                "Generic Attribute"
+            }
+        }
+        "180a" => {
+            if zh {
+                "设备信息"
+            } else {
+                "Device Information"
+            }
+        }
+        "180f" => {
+            if zh {
+                "电池服务"
+            } else {
+                "Battery Service"
+            }
+        }
+        _ => {
+            if zh {
+                "未知服务"
+            } else {
+                "Unknown service"
+            }
+        }
     }
 }

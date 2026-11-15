@@ -8,6 +8,7 @@ pub mod app;
 pub mod backend;
 pub mod cli;
 pub mod config;
+pub mod i18n;
 pub mod keybind;
 pub mod model;
 pub mod theme;

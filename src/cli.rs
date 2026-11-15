@@ -33,6 +33,7 @@ pub struct Overrides {
     pub default_sort: Option<String>,
     pub show_hidden_files: Option<bool>,
     pub scan_on_start: Option<bool>,
+    pub lang: Option<String>,
 }
 
 impl Overrides {
@@ -70,6 +71,9 @@ impl Overrides {
         }
         if let Some(v) = self.scan_on_start {
             cfg.scan_on_start = v;
+        }
+        if let Some(v) = &self.lang {
+            cfg.language = v.clone();
         }
     }
 }
@@ -142,6 +146,9 @@ pub fn parse() -> Result<Options, String> {
                 o.overrides.default_sort =
                     Some(needs_value(&args, &mut i, inline, "--default-sort")?)
             }
+            "--lang" | "--language" => {
+                o.overrides.lang = Some(needs_value(&args, &mut i, inline, "--lang")?)
+            }
             "--config" => {
                 o.config_path = Some(PathBuf::from(needs_value(
                     &args, &mut i, inline, "--config",
@@ -189,6 +196,9 @@ pub fn apply_env(cfg: &mut Config) {
     str_env!(theme, "BLUETUITH_RS_THEME", "BLUETUITH_THEME");
     str_env!(accent, "BLUETUITH_RS_ACCENT", "");
     str_env!(default_sort, "BLUETUITH_RS_DEFAULT_SORT", "");
+    if let Some(v) = env("BLUETUITH_RS_LANG", "") {
+        cfg.language = v;
+    }
     if env("BLUETUITH_RS_NO_WARNING", "BLUETUITH_NO_WARNING").is_some() {
         cfg.no_warning = true;
     }
@@ -203,7 +213,14 @@ pub fn apply_env(cfg: &mut Config) {
     }
 }
 
-pub const HELP: &str = "\
+/// Help text with the keybinding section generated from the live keymap, so
+/// it can never drift away from the bindings the program actually uses.
+pub fn help_text() -> String {
+    use crate::keybind::{Action as A, KeyMap};
+    let map = KeyMap::default();
+    let k = |a: A| map.label(a);
+    format!(
+        "\
 \x1b[1mbluetuith-rs\x1b[0m — a full-featured Bluetooth manager for the terminal
 
 \x1b[1mUSAGE\x1b[0m
@@ -214,16 +231,16 @@ pub const HELP: &str = "\
     -g, --generate                 Write a default config file and exit
     -a, --adapter <NAME>           Adapter to use (e.g. hci0 or a MAC)
     -r, --receive-dir <DIR>        Directory for received OBEX files
-    -m, --gsm-apn <APN>            APN for DUN dial-up networking
-    -b, --gsm-number <NUMBER>      Number to dial (default *99#)
+    -m, --gsm-apn <APN>            APN for DUN (reserved; not used yet)
+    -b, --gsm-number <NUMBER>      Number to dial (reserved; not used yet)
     -s, --adapter-states <LIST>    Startup states, e.g.
                                    'powered:yes,discoverable:yes,scan:no'
     -t, --connect-bdaddr <MAC>     Auto-connect this device on startup
-    -w, --no-warning               Suppress the unavailable-features banner
+    -w, --no-warning               Suppress startup warnings
     -i, --no-help-display          Hide the bottom keybinding strip
     -c, --confirm-on-quit          Ask for confirmation before quitting
         --no-confirm-on-quit       Quit immediately
-    -o, --disable-obex-services    Disable OBEX services
+    -o, --disable-obex-services    Disable Bluetooth file transfer (OBEX)
         --show-hidden-files        Show hidden files in the picker
         --scan-on-start            Start discovery at launch
         --theme <NAME>             Palette: Midnight, Nord, Catppuccin,
@@ -231,18 +248,59 @@ pub const HELP: &str = "\
                                    Rosé Pine, Solarized, Daylight
         --accent <#RRGGBB>         Override the accent colour
         --default-sort <KEY>       Name|Address|Rssi|Battery|State|Kind
+        --lang <CODE>              UI language: en | zh (default auto from $LANG)
         --config <PATH>            Use an alternate config file
         --demo                     Run against a simulated adapter (no BlueZ)
     -h, --help                     Print this help
     -V, --version                  Print version
 
 \x1b[1mKEYBINDINGS (main screen)\x1b[0m
-    ↑/↓ navigate · c connect · p pair · o power · S discoverable
-    P pairable · s scan · a adapter · t trust · b block · f send files
-    n network · A audio profiles · i info · d remove · v transfers
-    m media player · M hide player · / search · F3 sort · F4 theme
-    F2 details · F6 log · Ctrl+p palette · ? help · Q quit · Alt+m menu
+    ↑/↓ navigate · {connect} connect · {pair} pair · {power} power · {scan} scan
+    {disc} discoverable · {pairable} pairable · {adapter} adapter · {trust} trust
+    {block} block · {send} send files · {network} network · {audio} audio profiles
+    {info} info · {remove} remove · {transfers} transfers · {player} media player
+    {hide} hide player · {search} search · {sort} sort · {details} details
+    {theme} theme · {log} log · {about} about · {palette} palette · {help} help
+    {menu} menu · {quit} quit
+    Player: {toggle} play/pause · {shuffle} shuffle · {repeat} repeat
+    {f1} {f2} {f3} {f4} = adapter / device / view / help menus
 
 \x1b[1mFILES\x1b[0m
     ~/.config/bluetuith-rs/config.toml   configuration
-";
+",
+        connect = k(A::Connect),
+        pair = k(A::Pair),
+        power = k(A::Power),
+        scan = k(A::Scan),
+        disc = k(A::Discoverable),
+        pairable = k(A::Pairable),
+        adapter = k(A::ChangeAdapter),
+        trust = k(A::Trust),
+        block = k(A::Block),
+        send = k(A::SendFiles),
+        network = k(A::Network),
+        audio = k(A::AudioProfiles),
+        info = k(A::Info),
+        remove = k(A::Remove),
+        transfers = k(A::ProgressView),
+        player = k(A::PlayerShow),
+        hide = k(A::PlayerHide),
+        search = k(A::Search),
+        sort = k(A::CycleSort),
+        details = k(A::ToggleDetails),
+        theme = k(A::ThemePicker),
+        log = k(A::ShowLog),
+        about = k(A::About),
+        palette = k(A::CommandPalette),
+        help = k(A::Help),
+        menu = k(A::Menu),
+        quit = k(A::Quit),
+        toggle = k(A::PlayerTogglePlay),
+        shuffle = k(A::PlayerShuffle),
+        repeat = k(A::PlayerRepeat),
+        f1 = k(A::MenuAdapter),
+        f2 = k(A::MenuDevice),
+        f3 = k(A::MenuView),
+        f4 = k(A::MenuHelp),
+    )
+}

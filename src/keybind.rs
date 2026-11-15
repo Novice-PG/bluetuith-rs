@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use crate::i18n::Lang;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -17,13 +18,23 @@ pub enum Context {
 
 impl Context {
     pub fn label(self) -> &'static str {
-        match self {
-            Context::App => "Global",
-            Context::Device => "Device / Adapter",
-            Context::Files => "File picker",
-            Context::Progress => "Transfers",
-            Context::Player => "Media player",
-            Context::Extra => "Extras",
+        use crate::i18n::Lang;
+        self.label_for(Lang::En)
+    }
+    pub fn label_for(self, lang: crate::i18n::Lang) -> &'static str {
+        match (self, lang) {
+            (Context::App, crate::i18n::Lang::Zh) => "全局",
+            (Context::Device, crate::i18n::Lang::Zh) => "设备 / 适配器",
+            (Context::Files, crate::i18n::Lang::Zh) => "文件选择",
+            (Context::Progress, crate::i18n::Lang::Zh) => "传输",
+            (Context::Player, crate::i18n::Lang::Zh) => "媒体播放器",
+            (Context::Extra, crate::i18n::Lang::Zh) => "扩展",
+            (Context::App, _) => "Global",
+            (Context::Device, _) => "Device / Adapter",
+            (Context::Files, _) => "File picker",
+            (Context::Progress, _) => "Transfers",
+            (Context::Player, _) => "Media player",
+            (Context::Extra, _) => "Extras",
         }
     }
 }
@@ -32,6 +43,10 @@ impl Context {
 pub enum Action {
     // Global / App
     Menu,
+    MenuAdapter,
+    MenuDevice,
+    MenuView,
+    MenuHelp,
     Select,
     Cancel,
     Suspend,
@@ -41,8 +56,6 @@ pub enum Action {
     Help,
     NavigateUp,
     NavigateDown,
-    NavigateRight,
-    NavigateLeft,
     NavigateTop,
     NavigateBottom,
     // Adapter / Device
@@ -85,6 +98,8 @@ pub enum Action {
     PlayerStop,
     PlayerVolumeUp,
     PlayerVolumeDown,
+    PlayerShuffle,
+    PlayerRepeat,
     // Extras (not in bluetuith)
     Search,
     CycleSort,
@@ -94,6 +109,7 @@ pub enum Action {
     Refresh,
     CommandPalette,
     About,
+    Language,
 }
 
 impl Action {
@@ -101,6 +117,10 @@ impl Action {
         use Action::*;
         match self {
             Menu => "Menu",
+            MenuAdapter => "Adapter Menu",
+            MenuDevice => "Device Menu",
+            MenuView => "View Menu",
+            MenuHelp => "Help Menu",
             Select => "Select",
             Cancel => "Cancel",
             Suspend => "Suspend",
@@ -110,8 +130,6 @@ impl Action {
             Help => "Help",
             NavigateUp => "Navigate Up",
             NavigateDown => "Navigate Down",
-            NavigateRight => "Navigate Right",
-            NavigateLeft => "Navigate Left",
             NavigateTop => "Navigate Top",
             NavigateBottom => "Navigate Bottom",
             Power => "Power",
@@ -150,6 +168,8 @@ impl Action {
             PlayerStop => "Stop",
             PlayerVolumeUp => "Volume Up",
             PlayerVolumeDown => "Volume Down",
+            PlayerShuffle => "Toggle Shuffle",
+            PlayerRepeat => "Cycle Repeat",
             Search => "Search / Filter",
             CycleSort => "Cycle Sort",
             ThemePicker => "Theme Picker",
@@ -158,16 +178,87 @@ impl Action {
             Refresh => "Refresh",
             CommandPalette => "Command Palette",
             About => "About",
+            Language => "Language",
+        }
+    }
+
+    pub fn name_for(self, lang: crate::i18n::Lang) -> &'static str {
+        use crate::i18n::Lang;
+        use Action::*;
+        match (self, lang) {
+            (Menu, Lang::Zh) => "菜单",
+            (MenuAdapter, Lang::Zh) => "适配器菜单",
+            (MenuDevice, Lang::Zh) => "设备菜单",
+            (MenuView, Lang::Zh) => "视图菜单",
+            (MenuHelp, Lang::Zh) => "帮助菜单",
+            (Select, Lang::Zh) => "选择",
+            (Cancel, Lang::Zh) => "取消",
+            (Suspend, Lang::Zh) => "挂起",
+            (Quit, Lang::Zh) => "退出",
+            (Switch, Lang::Zh) => "切换",
+            (Close, Lang::Zh) => "关闭",
+            (Help, Lang::Zh) => "帮助",
+            (NavigateUp, Lang::Zh) => "上移",
+            (NavigateDown, Lang::Zh) => "下移",
+            (NavigateTop, Lang::Zh) => "顶部",
+            (NavigateBottom, Lang::Zh) => "底部",
+            (Power, Lang::Zh) => "电源",
+            (Discoverable, Lang::Zh) => "可发现",
+            (Pairable, Lang::Zh) => "可配对",
+            (Scan, Lang::Zh) => "扫描",
+            (ChangeAdapter, Lang::Zh) => "切换适配器",
+            (ProgressView, Lang::Zh) => "查看下载",
+            (PlayerHide, Lang::Zh) => "隐藏媒体播放器",
+            (PlayerShow, Lang::Zh) => "显示媒体播放器",
+            (Connect, Lang::Zh) => "连接",
+            (Pair, Lang::Zh) => "配对",
+            (Trust, Lang::Zh) => "信任",
+            (Block, Lang::Zh) => "屏蔽",
+            (SendFiles, Lang::Zh) => "发送文件",
+            (Network, Lang::Zh) => "网络选项",
+            (AudioProfiles, Lang::Zh) => "音频配置",
+            (Info, Lang::Zh) => "信息",
+            (Remove, Lang::Zh) => "移除",
+            (FileDirForward, Lang::Zh) => "进入目录",
+            (FileDirBack, Lang::Zh) => "返回上级",
+            (FileSelect, Lang::Zh) => "选择",
+            (FileInvertSelection, Lang::Zh) => "反选",
+            (FileSelectAll, Lang::Zh) => "全选",
+            (FileRefresh, Lang::Zh) => "刷新",
+            (FileToggleHidden, Lang::Zh) => "显示隐藏文件",
+            (FileConfirmSelection, Lang::Zh) => "确认选择",
+            (TransferSuspend, Lang::Zh) => "暂停传输",
+            (TransferResume, Lang::Zh) => "继续传输",
+            (TransferCancel, Lang::Zh) => "取消传输",
+            (PlayerTogglePlay, Lang::Zh) => "播放/暂停",
+            (PlayerNext, Lang::Zh) => "下一首",
+            (PlayerPrevious, Lang::Zh) => "上一首",
+            (PlayerSeekForward, Lang::Zh) => "快进",
+            (PlayerSeekBackward, Lang::Zh) => "快退",
+            (PlayerStop, Lang::Zh) => "停止",
+            (PlayerVolumeUp, Lang::Zh) => "音量+",
+            (PlayerVolumeDown, Lang::Zh) => "音量-",
+            (PlayerShuffle, Lang::Zh) => "随机播放",
+            (PlayerRepeat, Lang::Zh) => "循环模式",
+            (Search, Lang::Zh) => "搜索 / 筛选",
+            (CycleSort, Lang::Zh) => "切换排序",
+            (ThemePicker, Lang::Zh) => "主题选择",
+            (ToggleDetails, Lang::Zh) => "切换详情",
+            (ShowLog, Lang::Zh) => "事件日志",
+            (Refresh, Lang::Zh) => "刷新",
+            (CommandPalette, Lang::Zh) => "命令面板",
+            (About, Lang::Zh) => "关于",
+            (Language, Lang::Zh) => "语言",
+            _ => self.name(),
         }
     }
 
     pub fn context(self) -> Context {
         use Action::*;
         match self {
-            Menu | Select | Cancel | Suspend | Quit | Switch | Close | Help | NavigateUp
-            | NavigateDown | NavigateRight | NavigateLeft | NavigateTop | NavigateBottom => {
-                Context::App
-            }
+            Menu | MenuAdapter | MenuDevice | MenuView | MenuHelp | Select | Cancel | Suspend
+            | Quit | Switch | Close | Help | Language | NavigateUp | NavigateDown | NavigateTop
+            | NavigateBottom => Context::App,
             Power | Discoverable | Pairable | Scan | ChangeAdapter | ProgressView | PlayerHide
             | PlayerShow | Connect | Pair | Trust | Block | SendFiles | Network | AudioProfiles
             | Info | Remove => Context::Device,
@@ -175,9 +266,8 @@ impl Action {
             | FileRefresh | FileToggleHidden | FileConfirmSelection => Context::Files,
             TransferSuspend | TransferResume | TransferCancel => Context::Progress,
             PlayerTogglePlay | PlayerNext | PlayerPrevious | PlayerSeekForward
-            | PlayerSeekBackward | PlayerStop | PlayerVolumeUp | PlayerVolumeDown => {
-                Context::Player
-            }
+            | PlayerSeekBackward | PlayerStop | PlayerVolumeUp | PlayerVolumeDown
+            | PlayerShuffle | PlayerRepeat => Context::Player,
             Search | CycleSort | ThemePicker | ToggleDetails | ShowLog | Refresh
             | CommandPalette | About => Context::Extra,
         }
@@ -187,6 +277,10 @@ impl Action {
         use Action::*;
         vec![
             Menu,
+            MenuAdapter,
+            MenuDevice,
+            MenuView,
+            MenuHelp,
             Select,
             Cancel,
             Suspend,
@@ -196,8 +290,6 @@ impl Action {
             Help,
             NavigateUp,
             NavigateDown,
-            NavigateRight,
-            NavigateLeft,
             NavigateTop,
             NavigateBottom,
             Power,
@@ -236,6 +328,8 @@ impl Action {
             PlayerStop,
             PlayerVolumeUp,
             PlayerVolumeDown,
+            PlayerShuffle,
+            PlayerRepeat,
             Search,
             CycleSort,
             ThemePicker,
@@ -244,6 +338,7 @@ impl Action {
             Refresh,
             CommandPalette,
             About,
+            Language,
         ]
     }
 
@@ -317,12 +412,26 @@ impl KeySpec {
     }
 }
 
-/// Normalise an event so `Shift+q`, `Q` and `q` can be compared sanely.
+/// Normalise an event so letter keys are case-insensitive: `Shift+q`, `Q`
+/// and `q` all compare equal (with the Shift modifier folded away).
 fn normalize(code: KeyCode, mods: KeyModifiers) -> (KeyCode, KeyModifiers) {
     match code {
-        KeyCode::Char(c) if c.is_ascii_uppercase() => (code, mods - KeyModifiers::SHIFT),
+        KeyCode::Char(c) => {
+            let c = if c.is_ascii_alphabetic() {
+                c.to_ascii_lowercase()
+            } else {
+                c
+            };
+            (KeyCode::Char(c), mods - KeyModifiers::SHIFT)
+        }
         _ => (code, mods),
     }
+}
+
+/// A `KeySpec` with letter case/Shift folded in, for grouping in conflict checks.
+fn normalize_spec(spec: KeySpec) -> KeySpec {
+    let (code, mods) = normalize(spec.code, spec.mods);
+    KeySpec { code, mods }
 }
 
 pub fn matches(ev: &KeyEvent, spec: &KeySpec) -> bool {
@@ -419,27 +528,29 @@ impl Default for KeyMap {
             b.insert(a, k);
         };
         ins(&mut b, Menu, KeySpec::alt(Char('m')));
+        ins(&mut b, MenuAdapter, KeySpec::new(F(1)));
+        ins(&mut b, MenuDevice, KeySpec::new(F(2)));
+        ins(&mut b, MenuView, KeySpec::new(F(3)));
+        ins(&mut b, MenuHelp, KeySpec::new(F(4)));
         ins(&mut b, Select, KeySpec::new(Enter));
         ins(&mut b, Cancel, KeySpec::ctrl(Char('x')));
         ins(&mut b, Suspend, KeySpec::ctrl(Char('z')));
-        ins(&mut b, Quit, KeySpec::new(Char('Q')));
+        ins(&mut b, Quit, KeySpec::new(Char('q')));
         ins(&mut b, Switch, KeySpec::new(Tab));
         ins(&mut b, Close, KeySpec::new(Esc));
         ins(&mut b, Help, KeySpec::new(Char('?')));
         ins(&mut b, NavigateUp, KeySpec::new(Up));
         ins(&mut b, NavigateDown, KeySpec::new(Down));
-        ins(&mut b, NavigateRight, KeySpec::new(Right));
-        ins(&mut b, NavigateLeft, KeySpec::new(Left));
         ins(&mut b, NavigateTop, KeySpec::new(PageUp));
         ins(&mut b, NavigateBottom, KeySpec::new(PageDown));
 
         ins(&mut b, Power, KeySpec::new(Char('o')));
-        ins(&mut b, Discoverable, KeySpec::new(Char('S')));
-        ins(&mut b, Pairable, KeySpec::new(Char('P')));
+        ins(&mut b, Discoverable, KeySpec::alt(Char('s')));
+        ins(&mut b, Pairable, KeySpec::alt(Char('p')));
         ins(&mut b, Scan, KeySpec::new(Char('s')));
         ins(&mut b, ChangeAdapter, KeySpec::new(Char('a')));
         ins(&mut b, ProgressView, KeySpec::new(Char('v')));
-        ins(&mut b, PlayerHide, KeySpec::new(Char('M')));
+        ins(&mut b, PlayerHide, KeySpec::alt(Char('h')));
         ins(&mut b, PlayerShow, KeySpec::new(Char('m')));
         ins(&mut b, Connect, KeySpec::new(Char('c')));
         ins(&mut b, Pair, KeySpec::new(Char('p')));
@@ -447,7 +558,7 @@ impl Default for KeyMap {
         ins(&mut b, Block, KeySpec::new(Char('b')));
         ins(&mut b, SendFiles, KeySpec::new(Char('f')));
         ins(&mut b, Network, KeySpec::new(Char('n')));
-        ins(&mut b, AudioProfiles, KeySpec::new(Char('A')));
+        ins(&mut b, AudioProfiles, KeySpec::alt(Char('a')));
         ins(&mut b, Info, KeySpec::new(Char('i')));
         ins(&mut b, Remove, KeySpec::new(Char('d')));
 
@@ -455,7 +566,7 @@ impl Default for KeyMap {
         ins(&mut b, FileDirBack, KeySpec::new(Left));
         ins(&mut b, FileSelect, KeySpec::new(Char(' ')));
         ins(&mut b, FileInvertSelection, KeySpec::new(Char('a')));
-        ins(&mut b, FileSelectAll, KeySpec::new(Char('A')));
+        ins(&mut b, FileSelectAll, KeySpec::alt(Char('a')));
         ins(&mut b, FileRefresh, KeySpec::ctrl(Char('r')));
         ins(&mut b, FileToggleHidden, KeySpec::ctrl(Char('h')));
         ins(&mut b, FileConfirmSelection, KeySpec::ctrl(Char('s')));
@@ -472,15 +583,18 @@ impl Default for KeyMap {
         ins(&mut b, PlayerStop, KeySpec::new(Char(']')));
         ins(&mut b, PlayerVolumeUp, KeySpec::new(Char('+')));
         ins(&mut b, PlayerVolumeDown, KeySpec::new(Char('-')));
+        ins(&mut b, PlayerShuffle, KeySpec::new(Char('s')));
+        ins(&mut b, PlayerRepeat, KeySpec::new(Char('r')));
 
         ins(&mut b, Search, KeySpec::new(Char('/')));
-        ins(&mut b, CycleSort, KeySpec::new(F(3)));
-        ins(&mut b, ThemePicker, KeySpec::new(F(4)));
-        ins(&mut b, ToggleDetails, KeySpec::new(F(2)));
-        ins(&mut b, ShowLog, KeySpec::new(F(6)));
+        ins(&mut b, CycleSort, KeySpec::new(F(5)));
+        ins(&mut b, ToggleDetails, KeySpec::new(F(6)));
+        ins(&mut b, ThemePicker, KeySpec::new(F(7)));
+        ins(&mut b, ShowLog, KeySpec::new(F(8)));
+        ins(&mut b, About, KeySpec::new(F(9)));
         ins(&mut b, Refresh, KeySpec::ctrl(Char('r')));
         ins(&mut b, CommandPalette, KeySpec::ctrl(Char('p')));
-        ins(&mut b, About, KeySpec::new(F(12)));
+        ins(&mut b, Language, KeySpec::new(Char('l')));
 
         let mut map = Self {
             bindings: b,
@@ -537,7 +651,9 @@ impl KeyMap {
     fn detect_conflicts(&self) -> Vec<String> {
         let mut by_ctx: HashMap<Context, HashMap<KeySpec, Vec<Action>>> = HashMap::new();
         for action in Action::all() {
-            let spec = self.get(action);
+            // Group by the case-folded spec so `S` and `s` are seen as the
+            // same key.
+            let spec = normalize_spec(self.get(action));
             by_ctx
                 .entry(action.context())
                 .or_default()
@@ -563,10 +679,10 @@ impl KeyMap {
         out
     }
 
-    pub fn rows(&self) -> Vec<(Context, &'static str, String)> {
+    pub fn rows(&self, lang: Lang) -> Vec<(Context, &'static str, String)> {
         Action::all()
             .into_iter()
-            .map(|a| (a.context(), a.name(), self.label(a)))
+            .map(|a| (a.context(), a.name_for(lang), self.label(a)))
             .collect()
     }
 }
@@ -592,8 +708,13 @@ mod tests {
     }
 
     #[test]
-    fn uppercase_letter_matches_with_or_without_shift() {
+    fn letters_are_case_insensitive() {
         let map = KeyMap::default();
+        // q and Q both quit.
+        assert!(matches(
+            &ev(KeyCode::Char('q'), KeyModifiers::NONE),
+            &map.get(Action::Quit)
+        ));
         assert!(matches(
             &ev(KeyCode::Char('Q'), KeyModifiers::NONE),
             &map.get(Action::Quit)
@@ -602,10 +723,29 @@ mod tests {
             &ev(KeyCode::Char('Q'), KeyModifiers::SHIFT),
             &map.get(Action::Quit)
         ));
-        assert!(!matches(
-            &ev(KeyCode::Char('q'), KeyModifiers::NONE),
-            &map.get(Action::Quit)
+        // Uppercase S now means scan; discoverable is Alt+s.
+        assert!(matches(
+            &ev(KeyCode::Char('S'), KeyModifiers::NONE),
+            &map.get(Action::Scan)
         ));
+        assert!(!matches(
+            &ev(KeyCode::Char('S'), KeyModifiers::NONE),
+            &map.get(Action::Discoverable)
+        ));
+        assert!(matches(
+            &ev(KeyCode::Char('s'), KeyModifiers::ALT),
+            &map.get(Action::Discoverable)
+        ));
+    }
+
+    #[test]
+    fn default_bindings_have_no_conflicts() {
+        let map = KeyMap::default();
+        assert!(
+            map.conflicts.is_empty(),
+            "unexpected conflicts: {:?}",
+            map.conflicts
+        );
     }
 
     #[test]

@@ -32,7 +32,7 @@ fn main() {
 fn run() -> Result<()> {
     let opts = cli::parse().map_err(anyhow::Error::msg)?;
     if opts.help {
-        print!("{}", cli::HELP);
+        print!("{}", cli::help_text());
         return Ok(());
     }
     if opts.version {
@@ -186,6 +186,14 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                 EnableMouseCapture,
                 EnableBracketedPaste
             )?;
+            // Keyboard enhancement flags do not survive the terminal reset.
+            let _ = execute!(
+                stdout,
+                PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                )
+            );
             terminal.clear()?;
         }
 

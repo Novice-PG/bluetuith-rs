@@ -12,6 +12,7 @@ use bluetuith_rs::app::{App, Overlay};
 use bluetuith_rs::backend::demo::DemoBackend;
 use bluetuith_rs::config::Config;
 use bluetuith_rs::ui;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
@@ -53,9 +54,11 @@ fn main() {
         .get(4)
         .cloned()
         .unwrap_or_else(|| "/tmp/bluetuith-frame.json".into());
+    let language = args.get(5).cloned().unwrap_or_else(|| "en".into());
 
     let cfg = Config {
         demo: true,
+        language,
         ..Config::default()
     };
     let backend = Box::new(DemoBackend::new());
@@ -73,6 +76,11 @@ fn main() {
             app.rebuild_menu();
             app.push(Overlay::Menu);
         }
+        "view-menu" => {
+            app.menu_id = bluetuith_rs::app::MenuId::View;
+            app.rebuild_menu();
+            app.push(Overlay::Menu);
+        }
         "help" => app.push(Overlay::Help),
         "info" => app.push(Overlay::DeviceInfo),
         "progress" | "transfers" => app.push(Overlay::Progress),
@@ -84,6 +92,10 @@ fn main() {
         "files" | "filepicker" => app.push(Overlay::FilePicker),
         "log" => app.push(Overlay::Log),
         "palette" => app.push(Overlay::CommandPalette),
+        "palette-actions" => {
+            app.push(Overlay::CommandPalette);
+            app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        }
         "about" => app.push(Overlay::About),
         "confirm" => {
             app.confirm = Some(bluetuith_rs::app::ConfirmState {

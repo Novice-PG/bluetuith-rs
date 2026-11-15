@@ -34,8 +34,10 @@ fn line_lr<'a>(left: Vec<Span<'a>>, right: Vec<Span<'a>>, width: u16) -> Vec<Spa
 fn chip<'a>(label: &str, on: bool, t: &crate::theme::Theme) -> Span<'a> {
     let dot = if on { "●" } else { "○" };
     let fg = if on { t.success } else { t.muted };
+    // Uppercase Latin chip labels to match the compact header style; CJK text
+    // is left untouched by `to_ascii_uppercase`.
     Span::styled(
-        format!(" {dot} {label} "),
+        format!(" {dot} {} ", label.to_ascii_uppercase()),
         Style::new()
             .fg(fg)
             .bg(t.surface_alt)
@@ -47,12 +49,13 @@ fn chip<'a>(label: &str, on: bool, t: &crate::theme::Theme) -> Span<'a> {
 
 pub fn header(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let t = &app.theme;
+    let tr = app.tr();
     frame.render_widget(Block::default().style(Style::new().bg(t.header_bg)), area);
 
     let ad = app.current_adapter();
     let adapter_label = ad
         .map(|a| a.display_name())
-        .unwrap_or_else(|| "no adapter".into());
+        .unwrap_or_else(|| tr.msg_no_adapter.into());
     let adapter_id = ad.map(|a| a.id.clone()).unwrap_or_default();
     let n = app.visible_devices().len();
     let connected = app.visible_devices().iter().filter(|d| d.connected).count();
@@ -85,10 +88,10 @@ pub fn header(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Span::styled(format!(" ({adapter_id})"), Style::new().fg(t.muted)),
     ];
     let right = vec![
-        Span::styled(format!("{n} devices"), Style::new().fg(t.muted)),
+        Span::styled(format!("{} {}", n, tr.devices), Style::new().fg(t.muted)),
         Span::styled("  ·  ", Style::new().fg(t.dim)),
         Span::styled(
-            format!("{connected} connected"),
+            format!("{} {}", connected, tr.lg_connected),
             Style::new().fg(t.connected),
         ),
         Span::raw("   "),
@@ -114,10 +117,10 @@ pub fn header(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let powered = ad.map(|a| a.powered).unwrap_or(false);
     let mut spans: Vec<Span<'_>> = vec![Span::raw("  ")];
     for (label, on) in [
-        ("POWER", powered),
-        ("DISCOVERABLE", ad.map(|a| a.discoverable).unwrap_or(false)),
-        ("PAIRABLE", ad.map(|a| a.pairable).unwrap_or(false)),
-        ("SCAN", ad.map(|a| a.discovering).unwrap_or(false)),
+        (tr.power, powered),
+        (tr.discoverable, ad.map(|a| a.discoverable).unwrap_or(false)),
+        (tr.pairable, ad.map(|a| a.pairable).unwrap_or(false)),
+        (tr.st_scan, ad.map(|a| a.discovering).unwrap_or(false)),
     ] {
         spans.push(chip(label, on, t));
         spans.push(Span::raw(" "));
@@ -127,7 +130,10 @@ pub fn header(frame: &mut Frame<'_>, app: &App, area: Rect) {
             util::spinner(app.tick),
             Style::new().fg(t.accent),
         ));
-        spans.push(Span::styled(" scanning…", Style::new().fg(t.accent)));
+        spans.push(Span::styled(
+            format!(" {}", tr.st_scanning),
+            Style::new().fg(t.accent),
+        ));
     }
     if !app.filter.is_empty() {
         spans.push(Span::styled(
@@ -169,7 +175,7 @@ pub fn menubar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_widget(Block::default().style(Style::new().bg(t.surface)), area);
     let mut x = area.x + 1;
     for (i, id) in MenuId::all().iter().enumerate() {
-        let label = format!("  {}  ", id.label());
+        let label = format!("  {}  ", id.label(app.lang));
         let w = UnicodeWidthStr::width(label.as_str()) as u16;
         let rect = Rect {
             x,
@@ -190,7 +196,7 @@ pub fn menubar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
         x += w + 1;
     }
-    let badge = format!(" {:?} ", app.sort);
+    let badge = format!(" {} ", app.sort.label(app.lang));
     let bw = UnicodeWidthStr::width(badge.as_str()) as u16;
     if area.width > bw + 2 {
         frame.render_widget(
@@ -218,9 +224,10 @@ fn signal_color(bars: u8, t: &crate::theme::Theme) -> ratatui::style::Color {
 
 pub fn devices(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let t = app.theme.clone();
+    let tr = app.tr();
     let visible: Vec<Device> = app.visible_devices().into_iter().cloned().collect();
-    let title = format!("Devices ({})", visible.len());
-    let sort_hint = format!(" sort: {:?} ", app.sort);
+    let title = format!("{} ({})", tr.devices, visible.len());
+    let sort_hint = format!(" {}: {} ", tr.h_sort, app.sort.label(app.lang));
     let block = panel(&title, &t, true)
         .title_bottom(Line::from(Span::styled(sort_hint, Style::new().fg(t.dim))).right_aligned());
     let inner = block.inner(area);
@@ -290,20 +297,21 @@ pub fn devices(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     if visible.is_empty() {
         let msg = if app.filter.is_empty() {
-            "No devices yet — press s to start scanning"
+            tr.msg_no_devices
         } else {
-            "No devices match the filter"
+            tr.msg_no_devices_filter
         };
         frame.render_widget(
             Paragraph::new(Span::styled(msg, Style::new().fg(t.muted)))
                 .alignment(Alignment::Center),
             rows_rect,
         );
-    } else if h.saturating_sub(visible.len()) >= 4 {
-        // Use spare room for a legend instead of leaving a dead void.
+    } else if h.saturating_sub(visible.len()) >= 2 {
+        // Anchor the legend to the bottom of the panel (last two inner rows)
+        // instead of leaving a gap beneath it.
         let lr = Rect {
             x: inner.x,
-            y: inner.y + inner.height.saturating_sub(4),
+            y: inner.y + inner.height.saturating_sub(2),
             width: inner.width,
             height: 1,
         };
@@ -314,19 +322,19 @@ pub fn devices(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             ))),
             lr,
         );
+        // Keep the legend to the four state badges only; signal/battery are
+        // already explained in the details panel, and a long legend is simply
+        // clipped on a narrow device panel.
         let legend = Line::from(vec![
-            Span::styled("  ● ", Style::new().fg(t.connected)),
-            Span::styled("connected   ", Style::new().fg(t.dim)),
+            Span::styled(format!("  {}  ", tr.lg_title), Style::new().fg(t.muted)),
+            Span::styled("● ", Style::new().fg(t.connected)),
+            Span::styled(format!("{}   ", tr.lg_connected), Style::new().fg(t.dim)),
             Span::styled("◆ ", Style::new().fg(t.paired)),
-            Span::styled("paired   ", Style::new().fg(t.dim)),
+            Span::styled(format!("{}   ", tr.lg_paired), Style::new().fg(t.dim)),
             Span::styled("★ ", Style::new().fg(t.trusted)),
-            Span::styled("trusted   ", Style::new().fg(t.dim)),
+            Span::styled(format!("{}   ", tr.lg_trusted), Style::new().fg(t.dim)),
             Span::styled("⊘ ", Style::new().fg(t.blocked)),
-            Span::styled("blocked   ", Style::new().fg(t.dim)),
-            Span::styled("▂▄▆█ ", Style::new().fg(t.success)),
-            Span::styled("signal   ", Style::new().fg(t.dim)),
-            Span::styled("NN% ", Style::new().fg(t.warning)),
-            Span::styled("battery", Style::new().fg(t.dim)),
+            Span::styled(tr.lg_blocked, Style::new().fg(t.dim)),
         ]);
         frame.render_widget(
             Paragraph::new(legend),
@@ -342,6 +350,7 @@ pub fn devices(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
 fn header_line(app: &App, compact: bool) -> Line<'static> {
     let t = &app.theme;
+    let tr = app.tr();
     let nw = name_width(app.layout.device_rows.width as usize, compact);
     // Column widths are shared verbatim with `device_line`, so headers sit
     // exactly above their data.
@@ -356,29 +365,29 @@ fn header_line(app: &App, compact: bool) -> Line<'static> {
     let mut v = vec![
         Span::raw("  "), // selection marker
         Span::raw("  "), // kind glyph
-        hi("NAME", nw, SortKey::Name),
+        hi(tr.col_name, nw, SortKey::Name),
         Span::raw(" "),
-        hi("ADDRESS", 17, SortKey::Address),
+        hi(tr.col_address, 17, SortKey::Address),
     ];
     if !compact {
         v.push(Span::raw(" "));
-        v.push(hi("TYPE", 9, SortKey::Kind));
+        v.push(hi(tr.col_type, 9, SortKey::Kind));
     }
     v.push(Span::raw(" "));
-    v.push(hi("RSSI", 4, SortKey::Rssi));
+    v.push(hi(tr.col_rssi, 4, SortKey::Rssi));
     if !compact {
         v.push(Span::raw(" "));
-        v.push(hi("BAT", 5, SortKey::Battery));
+        v.push(hi(tr.col_bat, 5, SortKey::Battery));
     }
     v.push(Span::raw(" "));
-    v.push(hi("STATE", 5, SortKey::State));
+    v.push(hi(tr.col_state, 5, SortKey::State));
     Line::from(v)
 }
 
 fn name_width(w: usize, compact: bool) -> usize {
     // marker(2) + glyph(2) + name + 5 separators + address(17) + type(9)
-    // + signal(4) + battery(5) + badges(4)
-    let fixed = if compact { 32 } else { 48 };
+    // + signal(4) + battery(5) + spaced badges(7)
+    let fixed = if compact { 35 } else { 51 };
     w.saturating_sub(fixed).clamp(10, 44)
 }
 
@@ -404,7 +413,7 @@ fn device_line(d: &Device, compact: bool, app: &App, idx: usize) -> Line<'static
     if !compact {
         v.push(Span::raw(" "));
         v.push(Span::styled(
-            util::pad(d.kind().label(), 9),
+            util::pad(d.kind().label(app.lang), 9),
             Style::new().fg(t.muted),
         ));
     }
@@ -435,14 +444,17 @@ fn device_line(d: &Device, compact: bool, app: &App, idx: usize) -> Line<'static
         if d.connected { "●" } else { "○" },
         Style::new().fg(if d.connected { t.connected } else { t.dim }),
     ));
+    v.push(Span::raw(" "));
     v.push(Span::styled(
         if d.paired { "◆" } else { "◇" },
         Style::new().fg(if d.paired { t.paired } else { t.dim }),
     ));
+    v.push(Span::raw(" "));
     v.push(Span::styled(
         if d.trusted { "★" } else { "☆" },
         Style::new().fg(if d.trusted { t.trusted } else { t.dim }),
     ));
+    v.push(Span::raw(" "));
     v.push(Span::styled(
         if d.blocked { "⊘" } else { "·" },
         Style::new().fg(if d.blocked { t.blocked } else { t.dim }),
@@ -455,13 +467,14 @@ fn device_line(d: &Device, compact: bool, app: &App, idx: usize) -> Line<'static
 
 pub fn details(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let t = &app.theme;
-    let block = panel("Device Details", t, false);
+    let tr = app.tr();
+    let block = panel(tr.device_details, t, false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let Some(d) = app.selected_device().cloned() else {
         frame.render_widget(
-            Paragraph::new("Select a device to see its details").style(Style::new().fg(t.muted)),
+            Paragraph::new(tr.d_select_device).style(Style::new().fg(t.muted)),
             inner,
         );
         return;
@@ -484,26 +497,39 @@ pub fn details(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Style::new().fg(t.border),
     )));
 
-    let state = |label: &str, on: bool, color: ratatui::style::Color| {
-        Line::from(vec![
-            Span::styled(format!("  {:<14}", label), Style::new().fg(t.muted)),
-            Span::styled(
-                if on { "● yes" } else { "○ no " },
-                Style::new()
-                    .fg(if on { color } else { t.dim })
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])
-    };
-    lines.push(state("Connected", d.connected, t.connected));
-    lines.push(state("Paired", d.paired, t.paired));
-    lines.push(state("Trusted", d.trusted, t.trusted));
-    lines.push(state("Blocked", d.blocked, t.blocked));
+    // Use the same glyphs as the device-list badges and the legend, so the
+    // two panels read consistently (● connection, ◆ paired, ★ trusted, ⊘ blocked).
+    let state =
+        |label: &str, on: bool, on_glyph: &str, off_glyph: &str, color: ratatui::style::Color| {
+            Line::from(vec![
+                Span::styled(
+                    format!("  {}", util::pad(label, 14)),
+                    Style::new().fg(t.muted),
+                ),
+                Span::styled(
+                    format!(
+                        "{} {}",
+                        if on { on_glyph } else { off_glyph },
+                        if on { tr.yes } else { tr.no }
+                    ),
+                    Style::new()
+                        .fg(if on { color } else { t.dim })
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])
+        };
+    lines.push(state(tr.d_connected, d.connected, "●", "○", t.connected));
+    lines.push(state(tr.d_paired, d.paired, "◆", "◇", t.paired));
+    lines.push(state(tr.d_trusted, d.trusted, "★", "☆", t.trusted));
+    lines.push(state(tr.d_blocked, d.blocked, "⊘", "·", t.blocked));
     lines.push(Line::raw(""));
 
     let bars = d.signal_bars();
     lines.push(Line::from(vec![
-        Span::styled("  Signal        ", Style::new().fg(t.muted)),
+        Span::styled(
+            format!("  {}", util::pad(tr.d_signal, 14)),
+            Style::new().fg(t.muted),
+        ),
         Span::styled(
             util::signal_glyph(bars).to_string(),
             Style::new().fg(signal_color(bars, t)),
@@ -519,7 +545,10 @@ pub fn details(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("  Battery       ", Style::new().fg(t.muted)),
+        Span::styled(
+            format!("  {}", util::pad(tr.d_battery, 14)),
+            Style::new().fg(t.muted),
+        ),
         Span::styled(
             d.battery
                 .map(|p| format!("{p:>3}%  {}", util::battery_glyph(p)))
@@ -531,11 +560,17 @@ pub fn details(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("  Type          ", Style::new().fg(t.muted)),
-        Span::styled(d.kind().label().to_string(), Style::new().fg(t.fg)),
+        Span::styled(
+            format!("  {}", util::pad(tr.d_type, 14)),
+            Style::new().fg(t.muted),
+        ),
+        Span::styled(d.kind().label(app.lang).to_string(), Style::new().fg(t.fg)),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("  Class         ", Style::new().fg(t.muted)),
+        Span::styled(
+            format!("  {}", util::pad(tr.d_class, 14)),
+            Style::new().fg(t.muted),
+        ),
         Span::styled(
             d.class
                 .map(|c| format!("0x{c:06X}"))
@@ -545,26 +580,32 @@ pub fn details(frame: &mut Frame<'_>, app: &App, area: Rect) {
     ]));
     if !d.modalias.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("  Modalias      ", Style::new().fg(t.muted)),
+            Span::styled(
+                format!("  {}", util::pad(tr.d_modalias, 14)),
+                Style::new().fg(t.muted),
+            ),
             Span::styled(d.modalias.clone(), Style::new().fg(t.fg)),
         ]));
     }
     if !d.uuids.is_empty() {
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
-            "  Services",
+            format!("  {}", tr.d_services),
             Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
         )));
         for u in d.uuids.iter().take(6) {
             let short = if u.len() == 36 { &u[4..8] } else { u.as_str() };
             lines.push(Line::from(vec![
                 Span::styled("   • ", Style::new().fg(t.accent_soft)),
-                Span::styled(service_name(short).to_string(), Style::new().fg(t.muted)),
+                Span::styled(
+                    service_name(short, app.lang).to_string(),
+                    Style::new().fg(t.muted),
+                ),
             ]));
         }
         if d.uuids.len() > 6 {
             lines.push(Line::from(Span::styled(
-                format!("   … and {} more", d.uuids.len() - 6),
+                format!("   {}", crate::i18n::fill(tr.d_and_more, d.uuids.len() - 6)),
                 Style::new().fg(t.dim),
             )));
         }
@@ -584,7 +625,7 @@ pub fn details(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Gauge::default()
                     .ratio((p as f64 / 100.0).clamp(0.0, 1.0))
                     .gauge_style(Style::new().fg(t.success).bg(t.gauge_empty))
-                    .label(format!("battery {p}%")),
+                    .label(format!("{} {p}%", tr.d_battery)),
                 r,
             );
         }
@@ -595,6 +636,7 @@ pub fn details(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 pub fn player_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let t = &app.theme;
+    let tr = app.tr();
     let Some(p) = app.player.as_ref() else { return };
     frame.render_widget(Block::default().style(Style::new().bg(t.surface_alt)), area);
     let r0 = Rect {
@@ -616,7 +658,10 @@ pub fn player_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Span::styled(util::truncate(&p.artist, 22), Style::new().fg(t.muted)),
     ];
     let right = vec![
-        Span::styled(p.status.to_string(), Style::new().fg(t.info)),
+        Span::styled(
+            p.status.label(app.lang).to_string(),
+            Style::new().fg(t.info),
+        ),
         Span::styled("  ", Style::new()),
         Span::styled(
             format!(
@@ -627,7 +672,11 @@ pub fn player_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Style::new().fg(t.muted),
         ),
         Span::styled(
-            format!("   {}  vol {}%", p.device_name, p.volume),
+            format!(
+                "   {}  {}",
+                p.device_name,
+                crate::i18n::fill(tr.p_vol, p.volume)
+            ),
             Style::new().fg(t.dim),
         ),
     ];
@@ -670,16 +719,16 @@ pub fn player_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Span::styled("  ■ ", Style::new().fg(t.fg)),
         Span::styled("   ", Style::new()),
         Span::styled(
-            if p.shuffle {
-                "⇄ shuffle on"
-            } else {
-                "⇄ shuffle off"
-            },
+            format!(
+                "⇄ {} {}",
+                tr.p_shuffle,
+                if p.shuffle { tr.on } else { tr.off }
+            ),
             Style::new().fg(if p.shuffle { t.accent } else { t.dim }),
         ),
         Span::styled("   ", Style::new()),
         Span::styled(
-            format!("{} repeat", p.repeat.glyph()),
+            format!("{} {}", tr.p_repeat, p.repeat.glyph()),
             Style::new().fg(t.muted),
         ),
         Span::styled("   ", Style::new()),
@@ -688,10 +737,7 @@ pub fn player_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Style::new().fg(t.dim),
         ),
         Span::styled("    ", Style::new()),
-        Span::styled(
-            "Space play/pause · < > track · M hide · m player",
-            Style::new().fg(t.dim),
-        ),
+        Span::styled(tr.p_hint, Style::new().fg(t.dim)),
     ]);
     frame.render_widget(Paragraph::new(controls), r2);
 }
@@ -700,6 +746,7 @@ pub fn player_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 pub fn status(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let t = &app.theme;
+    let tr = app.tr();
     frame.render_widget(Block::default().style(Style::new().bg(t.surface)), area);
     let icon = app.status_icon().to_string();
     let color = app.status_color();
@@ -713,12 +760,22 @@ pub fn status(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Style::new().fg(color),
         ),
     ];
+    let k = |a: crate::keybind::Action| app.keys.label(a);
     let right = vec![
-        Span::styled("Alt+m Menu", Style::new().fg(t.dim)),
+        Span::styled(
+            format!("{} {}", k(crate::keybind::Action::Menu), tr.sb_menu),
+            Style::new().fg(t.dim),
+        ),
         Span::styled("  ·  ", Style::new().fg(t.border)),
-        Span::styled("? Help", Style::new().fg(t.dim)),
+        Span::styled(
+            format!("{} {}", k(crate::keybind::Action::Help), tr.sb_help),
+            Style::new().fg(t.dim),
+        ),
         Span::styled("  ·  ", Style::new().fg(t.border)),
-        Span::styled("Q Quit  ", Style::new().fg(t.dim)),
+        Span::styled(
+            format!("{} {}", k(crate::keybind::Action::Quit), tr.sb_quit),
+            Style::new().fg(t.dim),
+        ),
     ];
     frame.render_widget(
         Paragraph::new(Line::from(line_lr(left, right, area.width))),
@@ -726,38 +783,67 @@ pub fn status(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
-pub fn helpbar(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let t = &app.theme;
+pub fn helpbar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let t = app.theme.clone();
+    let tr = app.tr();
     frame.render_widget(Block::default().style(Style::new().bg(t.bg)), area);
-    let k = |a: crate::keybind::Action| app.keys.label(a);
-    let help_key = k(crate::keybind::Action::Help);
-    let hints: Vec<(&str, &str)> = vec![
-        ("↑↓", "navigate"),
-        ("c", "connect"),
-        ("p", "pair"),
-        ("s", "scan"),
-        ("o", "power"),
-        ("t", "trust"),
-        ("b", "block"),
-        ("f", "send"),
-        ("i", "info"),
-        ("d", "remove"),
-        ("v", "transfers"),
-        ("/", "search"),
-        ("F3", "sort"),
-        ("F4", "theme"),
-        (help_key.as_str(), "help"),
+    use crate::keybind::Action;
+    let k = |a: Action| app.keys.label(a);
+    // Every hint is derived from the live keymap, so rebinding an action also
+    // updates this strip (and it stays consistent with menus/help/palette).
+    let nav = format!("{}{}", k(Action::NavigateUp), k(Action::NavigateDown));
+    let hints: Vec<(String, &'static str, Option<Action>)> = vec![
+        (nav, tr.h_navigate, None),
+        (k(Action::Connect), tr.h_connect, Some(Action::Connect)),
+        (k(Action::Pair), tr.h_pair, Some(Action::Pair)),
+        (k(Action::Scan), tr.h_scan, Some(Action::Scan)),
+        (k(Action::Power), tr.h_power, Some(Action::Power)),
+        (k(Action::Trust), tr.h_trust, Some(Action::Trust)),
+        (k(Action::Block), tr.h_block, Some(Action::Block)),
+        (k(Action::SendFiles), tr.h_send, Some(Action::SendFiles)),
+        (k(Action::Info), tr.h_info, Some(Action::Info)),
+        (
+            k(Action::ProgressView),
+            tr.h_transfers,
+            Some(Action::ProgressView),
+        ),
+        (k(Action::Search), tr.h_search, Some(Action::Search)),
+        (k(Action::Help), tr.h_help, Some(Action::Help)),
     ];
     let mut spans: Vec<Span<'_>> = vec![Span::raw(" ")];
-    for (key, label) in hints {
+    let mut rects: Vec<(Rect, Action)> = Vec::new();
+    let mut x = area.x + 1;
+    for (key, label, action) in hints {
+        let key_txt = format!(" {key} ");
+        let lab_txt = format!("{label} ");
+        let w = UnicodeWidthStr::width(key_txt.as_str()) as u16
+            + UnicodeWidthStr::width(lab_txt.as_str()) as u16;
+        // Stop cleanly at the edge instead of rendering half a hint.
+        if x + w > area.x + area.width {
+            break;
+        }
+        // Record the whole hint (key + label) as a click target.
+        if let Some(a) = action {
+            rects.push((
+                Rect {
+                    x,
+                    y: area.y,
+                    width: w,
+                    height: 1,
+                },
+                a,
+            ));
+        }
         spans.push(Span::styled(
-            format!(" {key} "),
+            key_txt,
             Style::new()
                 .fg(t.accent_fg)
                 .bg(t.accent_soft)
                 .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(format!("{label} ",), Style::new().fg(t.dim)));
+        spans.push(Span::styled(lab_txt, Style::new().fg(t.dim)));
+        x += w;
     }
+    app.layout.help_rects = rects;
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
