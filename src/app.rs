@@ -722,8 +722,8 @@ impl App {
                 self.dispatch(Command::HidePlayer);
             }
             PlayerShow => {
-                if !self.features.media_player {
-                    self.set_status(Level::Warning, self.tr().msg_unavailable, false);
+                if self.player.is_none() {
+                    self.set_status(Level::Warning, self.tr().p_no_player, false);
                     return;
                 }
                 self.show_player_bar = true;
@@ -855,6 +855,11 @@ impl App {
                 };
                 // Keep the in-memory config consistent with the live UI.
                 self.config.language = self.lang.code().to_string();
+                // Menu item labels are cached at build time; refresh an open
+                // menu so it does not stay in the previous language.
+                if self.top_overlay() == Some(Overlay::Menu) {
+                    self.rebuild_menu();
+                }
                 self.set_status(
                     Level::Info,
                     format!("{}: {}", self.tr().language, self.lang.name()),
@@ -1175,16 +1180,44 @@ impl App {
         } else if self.keys.is(&ev, Action::Select) || matches!(ev.code, KeyCode::Enter) {
             self.search_active = false;
             self.set_status(Level::Info, fill(tr.msg_filter, &self.filter), false);
+        } else if self.keys.is(&ev, Action::NavigateUp) {
+            // Keep the list navigable while typing the filter.
+            self.move_selected(true);
+        } else if self.keys.is(&ev, Action::NavigateDown) {
+            self.move_selected(false);
         } else {
             match ev.code {
                 KeyCode::Backspace => {
                     self.filter.pop();
+                    self.selected = 0;
                 }
-                KeyCode::Char(c) => self.filter.push(c),
+                KeyCode::Char(c) => {
+                    self.filter.push(c);
+                    self.selected = 0;
+                }
                 _ => {}
             }
         }
-        self.selected = 0;
+    }
+
+    /// Move the device selection one step (with wraparound), used by the main
+    /// list and by the search input.
+    fn move_selected(&mut self, up: bool) {
+        let visible = self.visible_devices().len();
+        if visible == 0 {
+            return;
+        }
+        self.selected = if up {
+            if self.selected == 0 {
+                visible - 1
+            } else {
+                self.selected - 1
+            }
+        } else if self.selected + 1 >= visible {
+            0
+        } else {
+            self.selected + 1
+        };
     }
 
     fn confirm_key(&mut self, ev: KeyEvent) {
@@ -1612,25 +1645,11 @@ impl App {
         // Navigation
         let visible = self.visible_devices().len();
         if self.keys.is(&ev, Action::NavigateUp) {
-            if visible == 0 {
-                return;
-            }
-            self.selected = if self.selected == 0 {
-                visible - 1
-            } else {
-                self.selected - 1
-            };
+            self.move_selected(true);
             return;
         }
         if self.keys.is(&ev, Action::NavigateDown) {
-            if visible == 0 {
-                return;
-            }
-            self.selected = if self.selected + 1 >= visible {
-                0
-            } else {
-                self.selected + 1
-            };
+            self.move_selected(false);
             return;
         }
         if self.keys.is(&ev, Action::NavigateTop) {

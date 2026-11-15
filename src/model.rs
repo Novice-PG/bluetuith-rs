@@ -78,13 +78,17 @@ impl Device {
     }
 
     /// Coarse signal quality for the little bar chart.
+    ///
+    /// Returns 0..=4 so it matches the four glyphs of `util::signal_glyph`.
+    /// RSSI is roughly -40 dBm (touching) down to -90 dBm (barely in range);
+    /// the thresholds below spread the demo and real devices evenly across
+    /// the four bars instead of pinning most of them at full strength.
     pub fn signal_bars(&self) -> u8 {
         match self.rssi {
             None => 0,
-            Some(r) if r >= -50 => 5,
-            Some(r) if r >= -60 => 4,
-            Some(r) if r >= -70 => 3,
-            Some(r) if r >= -80 => 2,
+            Some(r) if r >= -55 => 4,
+            Some(r) if r >= -67 => 3,
+            Some(r) if r >= -78 => 2,
             Some(_) => 1,
         }
     }
@@ -577,7 +581,9 @@ mod tests {
             rssi: Some(-44),
             ..Default::default()
         };
-        assert_eq!(d.signal_bars(), 5);
+        assert_eq!(d.signal_bars(), 4);
+        d.rssi = Some(-70);
+        assert_eq!(d.signal_bars(), 2);
         d.rssi = Some(-85);
         assert_eq!(d.signal_bars(), 1);
         d.rssi = None;

@@ -892,3 +892,40 @@ fn cli_help_documents_the_player_controls() {
     assert!(h.contains("repeat"));
     assert!(h.contains("Directory for received OBEX files"));
 }
+
+#[test]
+fn arrow_keys_move_the_selection_while_searching() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut a = app();
+    a.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert!(a.search_active);
+    let before = a.selected;
+    a.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_ne!(a.selected, before, "Down was swallowed in search mode");
+    assert!(a.search_active, "search must stay active while navigating");
+}
+
+#[test]
+fn switching_language_refreshes_an_open_menu() {
+    use bluetuith_rs::keybind::Action;
+    let mut a = app();
+    a.open_menu_at(MenuId::Adapter);
+    let before = a.menu_items[0].label.clone();
+    a.do_action(Action::Language);
+    assert_ne!(
+        a.menu_items[0].label, before,
+        "an open menu keeps stale labels after a language switch"
+    );
+}
+
+#[test]
+fn player_show_warns_when_no_player_exists() {
+    let mut a = app();
+    a.player = None;
+    a.do_action(bluetuith_rs::keybind::Action::PlayerShow);
+    assert!(
+        a.top_overlay().is_none(),
+        "must not open an empty player window"
+    );
+    assert!(a.status.text.contains("No media player"));
+}

@@ -478,7 +478,7 @@ fn device_info(frame: &mut Frame<'_>, app: &mut App) {
             d.rssi
                 .map(|r| format!("{r} dBm"))
                 .unwrap_or_else(|| "—".into()),
-            signal_color(d.signal_bars(), &t),
+            util::signal_color(d.signal_bars(), &t),
         ),
         row(
             tr.d_txpower,
@@ -585,15 +585,6 @@ fn yesno(b: bool, tr: &Tr) -> String {
         tr.yes.into()
     } else {
         tr.no.into()
-    }
-}
-
-fn signal_color(bars: u8, t: &Theme) -> ratatui::style::Color {
-    match bars {
-        0 | 1 => t.error,
-        2 => t.warning,
-        3 => t.accent,
-        _ => t.success,
     }
 }
 

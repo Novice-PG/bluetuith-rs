@@ -1,5 +1,6 @@
 //! Small formatting helpers shared by the views.
 
+use crate::theme::Theme;
 use unicode_width::UnicodeWidthStr;
 
 pub fn human_bytes(n: u64) -> String {
@@ -60,15 +61,27 @@ pub fn pad(s: &str, width: usize) -> String {
     }
 }
 
-/// Unicode block signal bars, e.g. `▂▄▆█`.
+/// Unicode block signal bars, e.g. `▂▄▆█`. Level 0 (no RSSI) is a flat dash
+/// so the column keeps its width; `signal_color` renders it dim, not "error".
 pub fn signal_glyph(bars: u8) -> &'static str {
     match bars {
         0 => "────",
         1 => "▂───",
         2 => "▂▄──",
         3 => "▂▄▆─",
-        4 => "▂▄▆█",
         _ => "▂▄▆█",
+    }
+}
+
+/// Colour for a signal level. `0` is "no signal" and is dim so an unpaired or
+/// out-of-range device does not read as a broken one.
+pub fn signal_color(bars: u8, t: &Theme) -> ratatui::style::Color {
+    match bars {
+        0 => t.dim,
+        1 => t.error,
+        2 => t.warning,
+        3 => t.accent,
+        _ => t.success,
     }
 }
 

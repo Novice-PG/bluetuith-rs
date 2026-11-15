@@ -213,15 +213,6 @@ pub fn menubar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
 // ---------------------------------------------------------------------------
 
-fn signal_color(bars: u8, t: &crate::theme::Theme) -> ratatui::style::Color {
-    match bars {
-        0 | 1 => t.error,
-        2 => t.warning,
-        3 => t.accent,
-        _ => t.success,
-    }
-}
-
 pub fn devices(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let t = app.theme.clone();
     let tr = app.tr();
@@ -236,6 +227,17 @@ pub fn devices(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if inner.height < 3 {
         return;
     }
+    // Compute the rows geometry before the header so `header_line` and
+    // `device_line` derive column widths from the same rect on the very first
+    // frame (and right after a resize) instead of a stale one.
+    let rows_rect = Rect {
+        x: inner.x,
+        y: inner.y + 2,
+        width: inner.width,
+        height: inner.height.saturating_sub(2),
+    };
+    app.layout.device_rows = rows_rect;
+
     // Column header + separator.
     let compact = inner.width < 78;
     let hdr_rect = Rect {
@@ -259,13 +261,6 @@ pub fn devices(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         sep_rect,
     );
 
-    let rows_rect = Rect {
-        x: inner.x,
-        y: inner.y + 2,
-        width: inner.width,
-        height: inner.height.saturating_sub(2),
-    };
-    app.layout.device_rows = rows_rect;
     let h = rows_rect.height as usize;
     let start = if app.selected >= h {
         app.selected - h + 1
@@ -421,7 +416,7 @@ fn device_line(d: &Device, compact: bool, app: &App, idx: usize) -> Line<'static
     let bars = d.signal_bars();
     v.push(Span::styled(
         util::signal_glyph(bars).to_string(),
-        Style::new().fg(signal_color(bars, t)),
+        Style::new().fg(util::signal_color(bars, t)),
     ));
     if !compact {
         v.push(Span::raw(" "));
@@ -532,7 +527,7 @@ pub fn details(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ),
         Span::styled(
             util::signal_glyph(bars).to_string(),
-            Style::new().fg(signal_color(bars, t)),
+            Style::new().fg(util::signal_color(bars, t)),
         ),
         Span::styled(
             format!(
