@@ -57,29 +57,36 @@ fn main() -> anyhow::Result<()> {
     let before = read_discoverable(&probe)?;
     println!("before            = {before}");
 
+    // Toggle to the opposite value so the write is always a real change,
+    // whatever state the adapter happened to be in. Then restore the exact
+    // original value, rather than assuming it started as `false`.
+    let target = !before;
     app.dispatch(Command::SetAdapterProperty {
         property: AdapterProperty::Discoverable,
-        value: true,
+        value: target,
     });
     pump(&mut app, 600);
-    let after_true = read_discoverable(&probe)?;
+    let after = read_discoverable(&probe)?;
     println!(
-        "after Set(true)   = {after_true}   status={:?}",
+        "after Set({target})   = {after}   status={:?}",
         app.status.text
     );
 
     app.dispatch(Command::SetAdapterProperty {
         property: AdapterProperty::Discoverable,
-        value: false,
+        value: before,
     });
     pump(&mut app, 600);
     let restored = read_discoverable(&probe)?;
     println!(
-        "after Set(false)  = {restored}   status={:?}",
+        "after restore({before}) = {restored}   status={:?}",
         app.status.text
     );
 
-    assert!(after_true, "the program's Set(true) did not change BlueZ");
+    assert_eq!(
+        after, target,
+        "the program's Set({target}) did not change BlueZ"
+    );
     assert_eq!(restored, before, "adapter state was not restored");
     println!("REAL PROPERTY ROUND-TRIP OK");
     Ok(())

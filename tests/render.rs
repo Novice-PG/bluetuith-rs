@@ -929,3 +929,63 @@ fn player_show_warns_when_no_player_exists() {
     );
     assert!(a.status.text.contains("No media player"));
 }
+
+#[test]
+fn an_auth_prompt_is_answerable_while_a_filter_is_being_typed() {
+    use bluetuith_rs::backend::Event;
+    use bluetuith_rs::model::{AuthKind, AuthRequest};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut a = app();
+    a.search_active = true;
+    a.filter = "WH".into();
+    // A pairing / file-push prompt can arrive asynchronously, mid-filter.
+    a.apply_event(Event::AuthRequest(AuthRequest {
+        id: 7,
+        device: "AA:BB:CC:DD:EE:FF".into(),
+        device_name: "Phone".into(),
+        kind: AuthKind::Confirmation(123456),
+    }));
+    assert_eq!(a.top_overlay(), Some(Overlay::Auth));
+    // Enter must ACCEPT the request, not be swallowed by the search filter.
+    a.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(a.auth.is_none(), "auth request was never answered");
+    assert!(a.top_overlay().is_none(), "auth overlay did not close");
+    assert_eq!(a.filter, "WH", "the dialog must not consume filter text");
+}
+
+#[test]
+fn bracketed_paste_reaches_the_active_text_input() {
+    use bluetuith_rs::backend::Event;
+    use bluetuith_rs::model::{AuthKind, AuthRequest};
+    let mut a = app();
+
+    a.search_active = true;
+    a.on_paste("WH-1000\nXM5");
+    assert_eq!(a.filter, "WH-1000XM5", "newlines must be stripped");
+    a.search_active = false;
+    a.filter.clear();
+
+    a.push(Overlay::CommandPalette);
+    a.on_paste("Quit");
+    assert_eq!(a.palette_query, "Quit");
+    a.close_overlay();
+
+    a.apply_event(Event::AuthRequest(AuthRequest {
+        id: 9,
+        device: "AA:BB:CC:DD:EE:FF".into(),
+        device_name: "Phone".into(),
+        kind: AuthKind::PinCode,
+    }));
+    a.on_paste("12 34\t56");
+    assert_eq!(a.auth_input, "12 3456", "control chars must be stripped");
+    a.close_overlay();
+
+    a.apply_event(Event::AuthRequest(AuthRequest {
+        id: 10,
+        device: "AA:BB:CC:DD:EE:FF".into(),
+        device_name: "Phone".into(),
+        kind: AuthKind::Passkey(0),
+    }));
+    a.on_paste("ab12cd");
+    assert_eq!(a.auth_input, "12", "passkey entry accepts digits only");
+}

@@ -205,6 +205,9 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) 
                     }
                 }
                 event::Event::Mouse(m) => app.on_mouse(m),
+                // Bracketed paste is enabled above; without this arm a paste
+                // is delivered as one event and would otherwise be dropped.
+                event::Event::Paste(text) => app.on_paste(&text),
                 event::Event::Resize(_, _) => {}
                 _ => {}
             }

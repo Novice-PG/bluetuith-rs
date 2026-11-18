@@ -3,8 +3,8 @@
 //! is live here: toggles mutate state, pairing raises an auth request, file
 //! transfers advance, the player ticks, networks and profiles answer.
 
-use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 
 use super::*;
 
@@ -775,7 +775,7 @@ impl Backend for DemoBackend {
 }
 
 /// Used by the file picker in demo mode so it has something to show.
-pub fn demo_files(dir: &PathBuf) -> Vec<PathBuf> {
+pub fn demo_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
@@ -785,8 +785,3 @@ pub fn demo_files(dir: &PathBuf) -> Vec<PathBuf> {
     out.sort();
     out
 }
-
-/// Kept here so the compiler checks `HashSet` is used consistently with the
-/// selection state the UI mirrors.
-#[allow(dead_code)]
-fn _selection_type_hint(_: &HashSet<PathBuf>) {}

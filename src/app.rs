@@ -1055,10 +1055,11 @@ impl App {
     // ---- key handling -----------------------------------------------------
 
     pub fn on_key(&mut self, ev: KeyEvent) {
-        if self.search_active {
-            self.search_key(ev);
-            return;
-        }
+        // Modal overlays own the keyboard *before* any filter input: a pairing
+        // or file-push prompt can arrive while the user is typing a search, and
+        // leaving `search_active` in front would swallow every key the dialog
+        // needs — the backend agent would then wait forever for an answer the
+        // UI can no longer send.
         if self.top_overlay() == Some(Overlay::Auth) {
             self.auth_key(ev);
             return;
@@ -1090,7 +1091,14 @@ impl App {
             // Swallow everything the overlay did not consume.
             return;
         }
-        // No overlay: quit and the global shortcuts.
+        // A filter being typed is handled next; it captures printable keys
+        // until Enter/Esc ends it. This comes after the overlay checks on
+        // purpose (see the note at the top of `on_key`).
+        if self.search_active {
+            self.search_key(ev);
+            return;
+        }
+        // No overlay, no search: quit and the global shortcuts.
         if self.keys.is(&ev, Action::Quit) {
             self.do_action(Action::Quit);
             return;
@@ -1169,6 +1177,40 @@ impl App {
         }
 
         self.main_key(ev);
+    }
+
+    /// Feed a bracketed-paste string into whichever single-line input is
+    /// active. With `EnableBracketedPaste` the terminal sends one `Paste`
+    /// event instead of per-character key events; without this handler paste
+    /// is silently dropped in the search filter, pairing PIN and palette
+    /// query, making those fields look broken to anyone pasting into them.
+    pub fn on_paste(&mut self, text: &str) {
+        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+        if clean.is_empty() {
+            return;
+        }
+        match self.top_overlay() {
+            Some(Overlay::Auth) => {
+                let kind = self.auth.as_ref().map(|r| r.kind.clone());
+                match kind {
+                    Some(AuthKind::PinCode) => self.auth_input.push_str(&clean),
+                    Some(AuthKind::Passkey(_)) => self
+                        .auth_input
+                        .extend(clean.chars().filter(|c| c.is_ascii_digit())),
+                    _ => {}
+                }
+            }
+            Some(Overlay::CommandPalette) => {
+                self.palette_query.push_str(&clean);
+                self.rebuild_palette();
+            }
+            Some(_) => {}
+            None if self.search_active => {
+                self.filter.push_str(&clean);
+                self.selected = 0;
+            }
+            None => {}
+        }
     }
 
     fn search_key(&mut self, ev: KeyEvent) {

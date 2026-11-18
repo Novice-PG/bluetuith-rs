@@ -133,32 +133,38 @@ impl DeviceKind {
             uuids.contains(&full) || uuids.contains(short)
         };
 
-        if hay.contains("headphone") || hay.contains("headset") || has("1108") || has("110b") {
-            if hay.contains("headset") || has("1108") || has("111e") {
-                return Self::Headset;
-            }
+        // Product-name keywords are the most reliable signal, so they win
+        // first. A generic Bluetooth Class of Device must never override an
+        // obvious "keyboard"/"printer"/... name.
+        //
+        // Audio names MUST be checked before the generic "phone" keyword:
+        // "headphone", "earphone", "speakerphone" and "microphone" all contain
+        // the literal substring "phone", so a naive `contains("phone")` first
+        // would mislabel every headset as a phone.
+        if hay.contains("headset") {
+            return Self::Headset;
+        }
+        if hay.contains("headphone")
+            || hay.contains("earphone")
+            || hay.contains("earbud")
+            || hay.contains("airpod")
+        {
             return Self::Headphones;
         }
-        if hay.contains("speaker") || has("110b") || has("110a") {
+        if hay.contains("speaker") {
             return Self::Speaker;
-        }
-        if hay.contains("audio") && (has("110a") || has("110b")) {
-            return Self::AudioCard;
-        }
-        if hay.contains("keyboard") || has("1812") && hay.contains("keyboard") {
-            return Self::Keyboard;
         }
         if hay.contains("mouse") || hay.contains("mice") {
             return Self::Mouse;
         }
-        if hay.contains("phone") || hay.contains("smartphone") || hay.contains("mobile") {
-            return Self::Phone;
-        }
-        if hay.contains("watch") || hay.contains("wearable") {
-            return Self::Watch;
+        if hay.contains("keyboard") {
+            return Self::Keyboard;
         }
         if hay.contains("gamepad") || hay.contains("controller") || hay.contains("joystick") {
             return Self::Gamepad;
+        }
+        if hay.contains("watch") || hay.contains("wearable") {
+            return Self::Watch;
         }
         if hay.contains("printer") {
             return Self::Printer;
@@ -169,23 +175,45 @@ impl DeviceKind {
         if hay.contains("computer") || hay.contains("laptop") || hay.contains("desktop") {
             return Self::Computer;
         }
-        if has("1115") || has("1116") || hay.contains("network") {
+        if hay.contains("phone") || hay.contains("smartphone") || hay.contains("mobile") {
+            return Self::Phone;
+        }
+
+        // With no name hint, fall back to service UUIDs. HSP/HFP (1108/
+        // 111e/111f) are headsets; A2DP sink (110b) is headphones; A2DP
+        // source (110a) with a generic "audio" name is an audio card.
+        if has("1108") || has("111e") || has("111f") {
+            return Self::Headset;
+        }
+        if has("110b") {
+            return Self::Headphones;
+        }
+        if hay.contains("audio") && has("110a") {
+            return Self::AudioCard;
+        }
+
+        if has("1115") || has("1116") || has("1103") || hay.contains("network") {
             return Self::Network;
         }
-        // Fall back to the Bluetooth major device class when present.
+        // HID (0x1812) covers keyboards and mice. With no name hint, default
+        // to keyboard — but do it *before* the class fallback, which is a much
+        // weaker signal. Previously the class fallback ran first, so any HID
+        // device carrying a generic audio class was mislabelled "Audio".
+        if has("1812") || hay.contains("input") {
+            return Self::Keyboard;
+        }
+        // Class of Device is a last resort. Major class 0x04 is the whole
+        // "Audio/Video" family and far too broad to call AudioCard on its own,
+        // so it is deliberately not mapped (audio devices are handled above).
         if let Some(class) = d.class {
             match (class >> 8) & 0x1f {
                 0x01 => return Self::Computer,
                 0x02 => return Self::Phone,
-                0x04 => return Self::AudioCard,
                 0x05 => return Self::Keyboard, // peripheral
                 0x06 => return Self::Camera,
                 0x07 => return Self::Printer,
                 _ => {}
             }
-        }
-        if hay.contains("input") || has("1812") {
-            return Self::Keyboard;
         }
         Self::Unknown
     }
@@ -598,5 +626,37 @@ mod tests {
         };
         assert!(d.has_service("110b"));
         assert!(!d.has_service("1103"));
+    }
+
+    #[test]
+    fn hid_uuid_and_name_beat_a_generic_class_of_device() {
+        // Regression: the class fallback used to run *before* the HID (1812)
+        // fallback, so a keyboard carrying a generic Audio/Video class was
+        // reported as an AudioCard. The `&& hay.contains("keyboard")` clause
+        // was also dead code due to operator precedence.
+        let keyboard = Device {
+            name: "Keychron K8 Pro".into(),
+            uuids: vec!["00001812-0000-1000-8000-00805f9b34fb".into()],
+            class: Some(0x240404),
+            ..Default::default()
+        };
+        assert_eq!(keyboard.kind(), DeviceKind::Keyboard);
+
+        let named = Device {
+            name: "Office Printer".into(),
+            class: Some(0x240404),
+            ..Default::default()
+        };
+        assert_eq!(named.kind(), DeviceKind::Printer);
+    }
+
+    #[test]
+    fn a_broad_audio_class_alone_is_not_forced_to_audio() {
+        let d = Device {
+            name: "Generic gadget".into(),
+            class: Some(0x240404),
+            ..Default::default()
+        };
+        assert_eq!(d.kind(), DeviceKind::Unknown);
     }
 }

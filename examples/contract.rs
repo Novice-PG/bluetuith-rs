@@ -150,7 +150,9 @@ fn build_objects() -> Objects {
         props(&[
             ("Status", ov_str("playing")),
             ("Position", OwnedValue::from(61_000u32)),
-            ("Shuffle", OwnedValue::from(false)),
+            // BlueZ exposes Shuffle/Repeat as strings, not booleans; keep the
+            // mock faithful to the real D-Bus contract.
+            ("Shuffle", ov_str("off")),
             ("Repeat", ov_str("alltracks")),
             ("Volume", OwnedValue::from(60u8)),
         ]),

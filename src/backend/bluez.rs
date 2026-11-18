@@ -321,7 +321,7 @@ fn run(
     // Publish the first snapshot right away. The loop below waits up to 1.2s
     // in recv_timeout before its first refresh, which would otherwise leave
     // the UI showing "0 devices" for over a second on every startup.
-    refresh(&conn, &event_tx, &mut state, &cfg);
+    refresh(&conn, &event_tx, &mut state);
     loop {
         // Pairing prompts (device agent) and incoming-file prompts (OBEX
         // agent) share the same channel and the same UI dialog.
@@ -351,7 +351,7 @@ fn run(
                 let _ = register_obex_agent(&mut state, &agent_tx, &cfg);
             }
         }
-        refresh(&conn, &event_tx, &mut state, &cfg);
+        refresh(&conn, &event_tx, &mut state);
     }
 }
 
@@ -1091,7 +1091,7 @@ fn adjust_volume(conn: &Connection, delta: i16) -> Result<()> {
     ))
 }
 
-fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState, cfg: &Config) {
+fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState) {
     let objects = match managed_objects(conn, "org.bluez") {
         Ok(o) => o,
         Err(e) => {
@@ -1160,7 +1160,13 @@ fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState, cfg: 
             player_source = Some((path.as_str(), p));
         }
     }
-    let player = player_source.map(|(p, props)| parse_player(props, p, &devices));
+    let mut player = player_source.map(|(p, props)| parse_player(props, p, &devices));
+    // BlueZ keeps the AVRCP absolute volume (0..127) on MediaTransport1, not
+    // on MediaPlayer1 (which has no Volume property at all). Override the
+    // fallback from `parse_player` so the UI tracks what `adjust_volume` sets.
+    if let (Some(pl), Some(v)) = (player.as_mut(), first_transport_volume(&objects)) {
+        pl.volume = v.min(u8::MAX as u16) as u8;
+    }
 
     let _ = tx.send(Event::Snapshot {
         adapters,
@@ -1279,9 +1285,15 @@ fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState, cfg: 
         state.transfer_paths.clear();
         let _ = tx.send(Event::Transfers(Vec::new()));
     }
+}
 
-    let _ = cfg;
-    let _ = parent_path;
+/// First MediaTransport1 `Volume` found in the object map, if any.
+fn first_transport_volume(objects: &ManagedObjects) -> Option<u16> {
+    let iface = OwnedInterfaceName::try_from("org.bluez.MediaTransport1").ok()?;
+    objects
+        .values()
+        .filter_map(|ifaces| ifaces.get(&iface))
+        .find_map(|p| as_u16(p, "Volume"))
 }
 
 fn parse_player(p: &HashMap<String, OwnedValue>, path: &str, devices: &[Device]) -> PlayerState {
@@ -1293,10 +1305,18 @@ fn parse_player(p: &HashMap<String, OwnedValue>, path: &str, devices: &[Device])
         "error" => PlayStatus::Error,
         _ => PlayStatus::Stopped,
     };
+    // BlueZ exposes Shuffle (and Repeat) as *strings* ("off"/"alltracks"/
+    // "group"), not booleans — `player_property_cycle` writes them back as
+    // strings too. Reading it with `as_bool` always yielded false, so a real
+    // shuffle toggle was never reflected in the UI.
+    let shuffle = {
+        let s = as_string(p, "Shuffle").to_ascii_lowercase();
+        !s.is_empty() && s != "off"
+    };
     let mut ps = PlayerState {
         status,
         position_ms: as_u32(p, "Position").unwrap_or(0) as u64,
-        shuffle: as_bool(p, "Shuffle"),
+        shuffle,
         repeat: match as_string(p, "Repeat").to_ascii_lowercase().as_str() {
             "singletrack" => RepeatMode::Single,
             "alltracks" => RepeatMode::All,
@@ -1420,6 +1440,43 @@ mod tests {
         assert_eq!(safe_filename("../../etc/passwd"), "passwd");
         assert_eq!(safe_filename("/tmp/a/b.txt"), "b.txt");
         assert_eq!(safe_filename(""), "incoming.bin");
+    }
+
+    #[test]
+    fn parse_player_reads_shuffle_from_a_string() {
+        use zbus::zvariant::{OwnedValue, Str};
+        let mut props = HashMap::new();
+        props.insert(
+            "Shuffle".to_string(),
+            OwnedValue::from(Str::from("alltracks".to_string())),
+        );
+        assert!(parse_player(&props, "/org/bluez/hci0/dev_A/player0", &[]).shuffle);
+        props.insert(
+            "Shuffle".to_string(),
+            OwnedValue::from(Str::from("off".to_string())),
+        );
+        assert!(!parse_player(&props, "/org/bluez/hci0/dev_A/player0", &[]).shuffle);
+        props.remove("Shuffle");
+        assert!(!parse_player(&props, "/org/bluez/hci0/dev_A/player0", &[]).shuffle);
+    }
+
+    #[test]
+    fn transport_volume_is_read_from_media_transport() {
+        use zbus::zvariant::OwnedValue;
+        let mut objects = ManagedObjects::new();
+        let mut ifaces = HashMap::new();
+        let mut props = HashMap::new();
+        props.insert("Volume".to_string(), OwnedValue::from(72u16));
+        ifaces.insert(
+            OwnedInterfaceName::try_from("org.bluez.MediaTransport1").unwrap(),
+            props,
+        );
+        objects.insert(
+            OwnedObjectPath::try_from("/org/bluez/hci0/dev_A/fd0").unwrap(),
+            ifaces,
+        );
+        assert_eq!(first_transport_volume(&objects), Some(72));
+        assert_eq!(first_transport_volume(&ManagedObjects::new()), None);
     }
 
     #[test]

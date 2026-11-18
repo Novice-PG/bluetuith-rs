@@ -151,10 +151,13 @@ impl Action {
             Remove => "Remove",
             FileDirForward => "Go Forward",
             FileDirBack => "Go Back",
-            FileSelect => "Select",
+            // Names must be unique: `from_name` (config `[keybindings]`) does a
+            // first-match lookup by name, so sharing "Select"/"Refresh" with
+            // the App-level actions made these two impossible to rebind.
+            FileSelect => "File Select",
             FileInvertSelection => "Invert Selection",
             FileSelectAll => "Select All",
-            FileRefresh => "Refresh",
+            FileRefresh => "File Refresh",
             FileToggleHidden => "Hidden",
             FileConfirmSelection => "Confirm Selection",
             TransferSuspend => "Suspend Transfer",
@@ -221,10 +224,10 @@ impl Action {
             (Remove, Lang::Zh) => "移除",
             (FileDirForward, Lang::Zh) => "进入目录",
             (FileDirBack, Lang::Zh) => "返回上级",
-            (FileSelect, Lang::Zh) => "选择",
+            (FileSelect, Lang::Zh) => "选择文件",
             (FileInvertSelection, Lang::Zh) => "反选",
             (FileSelectAll, Lang::Zh) => "全选",
-            (FileRefresh, Lang::Zh) => "刷新",
+            (FileRefresh, Lang::Zh) => "刷新列表",
             (FileToggleHidden, Lang::Zh) => "显示隐藏文件",
             (FileConfirmSelection, Lang::Zh) => "确认选择",
             (TransferSuspend, Lang::Zh) => "暂停传输",
@@ -493,7 +496,16 @@ pub fn parse_key(input: &str) -> Option<KeySpec> {
         "pgdn" | "pgdown" | "pagedown" => KeyCode::PageDown,
         "del" | "delete" => KeyCode::Delete,
         "ins" | "insert" => KeyCode::Insert,
-        _ if lower.starts_with('f') && lower.len() <= 3 => {
+        // Function keys are exactly `f` + decimal digits (F1..F12). A bare
+        // `f` (or `f` followed by non-digits) is an ordinary character key and
+        // must fall through to the single-character arm below; treating every
+        // short `f...` token as a function key made `parse_key("f")` return
+        // None, so the `f` key could never be bound from a config file.
+        _ if lower.starts_with('f')
+            && lower.len() >= 2
+            && lower.len() <= 3
+            && lower[1..].bytes().all(|b| b.is_ascii_digit()) =>
+        {
             let n: u8 = lower[1..].parse().ok()?;
             if !(1..=12).contains(&n) {
                 return None;
@@ -704,6 +716,9 @@ mod tests {
         assert_eq!(parse_key("Enter").unwrap().code, KeyCode::Enter);
         assert_eq!(parse_key("PgUp").unwrap().code, KeyCode::PageUp);
         assert_eq!(parse_key("F3").unwrap().code, KeyCode::F(3));
+        let cf = parse_key("Ctrl+F12").unwrap();
+        assert_eq!(cf.code, KeyCode::F(12));
+        assert_eq!(cf.mods, KeyModifiers::CONTROL);
         assert!(parse_key("Ctrl+Alt+Delete+Extra").is_none());
     }
 
@@ -746,6 +761,35 @@ mod tests {
             "unexpected conflicts: {:?}",
             map.conflicts
         );
+    }
+
+    #[test]
+    fn a_bare_f_key_is_not_parsed_as_a_function_key() {
+        // Regression: `f` used to be swallowed by the F1..F12 arm, which tried
+        // to parse the empty remainder as a number and returned None.
+        assert_eq!(parse_key("f").unwrap().code, KeyCode::Char('f'));
+        assert_eq!(parse_key("f").unwrap().mods, KeyModifiers::NONE);
+        assert!(parse_key("fa").is_none()); // not a single key
+        assert_eq!(parse_key("F1").unwrap().code, KeyCode::F(1));
+        assert_eq!(parse_key("f12").unwrap().code, KeyCode::F(12));
+        assert!(parse_key("f13").is_none());
+    }
+
+    #[test]
+    fn every_action_name_is_unique_so_config_can_target_it() {
+        let mut seen = HashMap::new();
+        for a in Action::all() {
+            let name = a.name();
+            assert!(
+                seen.insert(name, a).is_none(),
+                "duplicate action name {name:?} shared by {a:?}"
+            );
+            // `from_name` must round-trip to the same action.
+            assert_eq!(Action::from_name(name), Some(a), "name {name:?}");
+        }
+        // The two file-picker actions are now independently bindable.
+        assert_eq!(Action::from_name("file select"), Some(Action::FileSelect));
+        assert_eq!(Action::from_name("file refresh"), Some(Action::FileRefresh));
     }
 
     #[test]
