@@ -906,6 +906,25 @@ fn arrow_keys_move_the_selection_while_searching() {
 }
 
 #[test]
+fn header_shows_the_filter_once_while_searching() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut a = app();
+    a.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    // A token no demo device contains, so its only occurrence is the header.
+    for c in "ZZQQ".chars() {
+        a.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert!(a.search_active);
+    assert_eq!(a.filter, "ZZQQ");
+    let buf = render(a, 150, 44);
+    let count = buf.matches("ZZQQ").count();
+    assert_eq!(
+        count, 1,
+        "filter text must appear exactly once in the header while typing, not duplicated"
+    );
+}
+
+#[test]
 fn switching_language_refreshes_an_open_menu() {
     use bluetuith_rs::keybind::Action;
     let mut a = app();

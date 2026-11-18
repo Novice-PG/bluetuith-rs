@@ -111,9 +111,12 @@ jobs:
           # the script builds the binary itself for musl targets, so for gnu
           # targets we only need to re-point it at the already-built binary.
           python3 - <<'PY'
-          import os, pathlib, shutil, subprocess, gzip
+          import os, pathlib, shutil, subprocess, gzip, re
           arch = os.environ["ARCH"]; triple = os.environ["TRIPLE"]
-          version = "0.1.0"
+          # Keep the GNU-built packages in lockstep with the musl ones (which
+          # read Cargo.toml through build-debs.sh) instead of hardcoding it.
+          version = re.search(r'^version = "([^"]+)"',
+                              pathlib.Path("Cargo.toml").read_text(), re.M).group(1)
           out = pathlib.Path("packaging/out"); out.mkdir(parents=True, exist_ok=True)
           pkg = out / f".stage-{arch}"
           if pkg.exists(): shutil.rmtree(pkg)

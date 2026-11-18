@@ -135,16 +135,19 @@ pub fn header(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Style::new().fg(t.accent),
         ));
     }
-    if !app.filter.is_empty() {
-        spans.push(Span::styled(
-            format!("   ⌕ {}", app.filter),
-            Style::new().fg(t.warning).add_modifier(Modifier::BOLD),
-        ));
-    }
+    // While searching, show the live input with a cursor. Once committed the
+    // filter persists but `search_active` is false — show it without a cursor.
+    // These are mutually exclusive: rendering both produced a duplicated
+    // "⌕ text" in the header for the whole time the user typed a filter.
     if app.search_active {
         spans.push(Span::styled(
             format!("   ⌕ {}_", app.filter),
             Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
+        ));
+    } else if !app.filter.is_empty() {
+        spans.push(Span::styled(
+            format!("   ⌕ {}", app.filter),
+            Style::new().fg(t.warning).add_modifier(Modifier::BOLD),
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), row1);

@@ -77,23 +77,39 @@ fn run() -> Result<()> {
         original_hook(info);
     }));
 
+    // If any setup step after `enable_raw_mode` fails, the `?` would otherwise
+    // return without restoring the terminal, leaving the user's shell in raw
+    // mode with no echo. Group setup so every failure path restores it.
     let mut stdout = io::stdout();
-    enable_raw_mode()?;
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    )?;
-    let _ = execute!(
-        stdout,
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-        )
-    );
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-    terminal.hide_cursor()?;
+    let setup = (|| -> anyhow::Result<()> {
+        enable_raw_mode()?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
+        let _ = execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
+        );
+        Ok(())
+    })();
+    if let Err(e) = setup {
+        restore_terminal();
+        return Err(e);
+    }
+    let mut terminal = match Terminal::new(CrosstermBackend::new(stdout)) {
+        Ok(t) => t,
+        Err(e) => {
+            restore_terminal();
+            return Err(e.into());
+        }
+    };
+    let _ = terminal.hide_cursor();
 
     let result = event_loop(&mut terminal, &mut app);
 
