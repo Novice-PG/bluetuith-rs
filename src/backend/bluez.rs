@@ -206,6 +206,13 @@ struct ThreadState {
     obex_conn: Option<Connection>,
     /// OBEX transfer id -> object path, so Suspend/Resume/Cancel can reach it.
     transfer_paths: HashMap<usize, String>,
+    /// Object path -> stable id. The old `sum(path bytes) % 100_000` scheme
+    /// collided for distinct paths (e.g. `session0/transfer1` and
+    /// `session1/transfer0` both hash to the same value), which made control
+    /// commands hit the wrong transfer when two were active at once.
+    transfer_ids: HashMap<String, usize>,
+    /// Monotonic source for the stable transfer ids above.
+    next_transfer_id: usize,
     /// Active network id -> (device address, role), so Disconnect can reach it.
     network_devices: HashMap<usize, (String, NetworkRole)>,
     /// "address|uuid" pairs the user disconnected this session. BlueZ does not
@@ -298,6 +305,8 @@ fn run(
         last_transfer_count: 0,
         obex_conn: None,
         transfer_paths: HashMap::new(),
+        transfer_ids: HashMap::new(),
+        next_transfer_id: 1,
         network_devices: HashMap::new(),
         disconnected_networks: HashSet::new(),
         obex_agent_registered: false,
@@ -1091,6 +1100,20 @@ fn adjust_volume(conn: &Connection, delta: i16) -> Result<()> {
     ))
 }
 
+/// Return a stable, collision-free id for an OBEX transfer object path.
+/// Ids are allocated once per path and reused on every subsequent poll, so a
+/// Suspend/Resume/Cancel issued later still reaches the same transfer even if
+/// other transfers have appeared in the meantime.
+fn transfer_id(state: &mut ThreadState, path: &str) -> usize {
+    if let Some(id) = state.transfer_ids.get(path) {
+        return *id;
+    }
+    let id = state.next_transfer_id;
+    state.next_transfer_id += 1;
+    state.transfer_ids.insert(path.to_string(), id);
+    id
+}
+
 fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState) {
     let objects = match managed_objects(conn, "org.bluez") {
         Ok(o) => o,
@@ -1252,13 +1275,7 @@ fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState) {
                 continue;
             };
             let status = as_string(p, "Status").to_ascii_lowercase();
-            let id = path
-                .as_str()
-                .as_bytes()
-                .iter()
-                .map(|b| *b as usize)
-                .sum::<usize>()
-                % 100_000;
+            let id = transfer_id(state, path.as_str());
             state.transfer_paths.insert(id, path.as_str().to_string());
             transfers.push(Transfer {
                 id,
@@ -1368,10 +1385,29 @@ mod tests {
             last_transfer_count: 0,
             obex_conn: None,
             transfer_paths: HashMap::new(),
+            transfer_ids: HashMap::new(),
+            next_transfer_id: 1,
             network_devices: HashMap::new(),
             disconnected_networks: HashSet::new(),
             obex_agent_registered: false,
         }
+    }
+
+    #[test]
+    fn transfer_ids_are_stable_and_collision_free() {
+        let mut state = empty_state();
+        // These two distinct object paths collided under the old
+        // `sum(bytes) % 100_000` scheme (both hashed to 3963).
+        let a = "/org/bluez/obex/client/session0/transfer1";
+        let b = "/org/bluez/obex/client/session1/transfer0";
+        let id_a = transfer_id(&mut state, a);
+        let id_b = transfer_id(&mut state, b);
+        assert_ne!(id_a, id_b, "distinct transfer paths must get distinct ids");
+        // Repeated lookups across polls must return the same id.
+        assert_eq!(transfer_id(&mut state, a), id_a);
+        assert_eq!(transfer_id(&mut state, b), id_b);
+        // And a third, unrelated path gets yet another fresh id.
+        assert_ne!(transfer_id(&mut state, "/org/bluez/obex/transfer0"), id_a);
     }
 
     /// OBEX capability flags must be driven by the live probe, never hardcoded
