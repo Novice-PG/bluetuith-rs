@@ -191,8 +191,13 @@ impl Config {
         if s.len() != 6 {
             return;
         }
-        let parse = |i: usize| u8::from_str_radix(&s[i..i + 2], 16);
-        if let (Ok(r), Ok(g), Ok(b)) = (parse(0), parse(2), parse(4)) {
+        // `s.len() == 6` counts *bytes*, so a value such as "éa€" is 6 bytes
+        // yet slicing `&s[i..i+2]` can land mid-codepoint and panic. Use
+        // `str::get`, which returns None on a bad boundary, and let
+        // `from_str_radix` reject any non-hex pair — malformed overrides are
+        // simply ignored instead of taking down the app.
+        let parse = |i: usize| s.get(i..i + 2).and_then(|p| u8::from_str_radix(p, 16).ok());
+        if let (Some(r), Some(g), Some(b)) = (parse(0), parse(2), parse(4)) {
             let c = ratatui::style::Color::Rgb(r, g, b);
             theme.accent = c;
             theme.border_focus = c;
@@ -220,6 +225,27 @@ mod tests {
                 ("scan".to_string(), true),
             ]
         );
+    }
+
+    #[test]
+    fn a_non_ascii_accent_is_ignored_without_panicking() {
+        // Regression: `accent = "éa€"` is 6 bytes but slicing `&s[i..i+2]`
+        // used to panic mid-codepoint. It must simply leave the theme alone.
+        let mut theme = crate::theme::Theme::midnight();
+        let before = theme.accent;
+        let cfg = Config {
+            accent: "éa€".into(),
+            ..Config::default()
+        };
+        cfg.apply_accent(&mut theme);
+        assert_eq!(theme.accent, before);
+        // A valid accent is still applied.
+        let cfg = Config {
+            accent: "#1a2b3c".into(),
+            ..Config::default()
+        };
+        cfg.apply_accent(&mut theme);
+        assert_eq!(theme.accent, ratatui::style::Color::Rgb(0x1a, 0x2b, 0x3c));
     }
 
     #[test]

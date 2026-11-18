@@ -36,8 +36,6 @@ fn nav_keys(app: &App) -> String {
     )
 }
 
-/// Clamp the scroll offset to the content so scrolling past the end cannot
-/// leave an empty window, and write the corrected value back to the app.
 /// Localised description for a known audio profile (the backend emits
 /// English text, so map by profile name here).
 fn profile_desc(name: &str, lang: Lang) -> &'static str {
@@ -52,6 +50,8 @@ fn profile_desc(name: &str, lang: Lang) -> &'static str {
     }
 }
 
+/// Clamp the scroll offset to the content so scrolling past the end cannot
+/// leave an empty window, and write the corrected value back to the app.
 fn clamp_scroll(app: &mut App, nlines: usize, height: u16) -> u16 {
     let max_off = nlines.saturating_sub(height as usize);
     let off = app.overlay_scroll.min(max_off);
