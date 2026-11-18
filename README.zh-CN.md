@@ -147,19 +147,31 @@ D-Bus 后端、事件循环和每个界面组件都是原创 Rust。它在功能
 | `--demo` 模拟适配器 | — | ✓ |
 | 静态多架构 `.deb` 包 | — | ✓ |
 
-**关于表中三个「未完全对齐」项的说明**：
+**为什么有几项打了折扣？——不是没做完，是刻意的范围取舍**
 
-- **OBEX 接收 + `receive-dir`**：已完整实现。Rust 版注册了真正的
+bluetuith-rs 的设计目标是**单个静态二进制，除 D-Bus/BlueZ 外零运行时依赖**。
+上表几个带说明的勾，原版 Go 项目是靠接入额外的系统守护进程拿到的；本项目
+刻意不引入这些重依赖，具体原因如下：
+
+- **OBEX 接收 + `receive-dir`：已完整实现。** 本进程内注册了真正的
   `org.bluez.obex.Agent1`，来电文件弹授权框、写入 `receive-dir`，并通过
-  `safe_filename` 防止目录穿越。唯一的保留是所有真机功能的共同说明——本地
-  只验证了 D-Bus 契约，端到端推送仍需对端设备配合。
-- **DUN 保留**：PANU / NAP 已完整实现（走 `Network1.Connect` + 完整 128 位
-  UUID）。DUN 拨号是 **BlueZ 本身没有提供 API**（`Network1` 不支持拨号上网），
-  因此选择 DUN 时会明确提示「not provided by BlueZ Network1」，而不是发出一个
-  注定失败的调用。这是 BlueZ 的限制，不是半成品。
-- **音频 profile 仅列出**：能列出设备支持的 A2DP/HFP/HSP/AVRCP，但无法切换，
-  因为 BlueZ 没有切换音频 profile 的 API（那是 bluez-alsa/PipeWire/PulseAudio
-  的职责）。真机上为只读；`--demo` 里可切换仅为演示。
+  `safe_filename` 防止目录穿越。除提供 OBEX 服务本身的 `bluez-obexd` 外不需要
+  其他守护进程。唯一的保留是所有真机功能的共同说明——本地用假 obexd 验证了
+  D-Bus 契约，端到端推送仍需对端设备配合。
+- **DUN 拨号：刻意不做。** BlueZ 的 `Network1` 只提供 BNEP（PAN）角色，DUN 拨号
+  需要一套 PPP 协议栈。原版之所以能给 DUN 打 ✓，是因为它集成了
+  **ModemManager**（内部封装了 `pppd`）。在本项目里加上它意味着引入一个重量级
+  运行时依赖，所以选择 DUN 时会明确提示「not provided by BlueZ Network1」，而
+  不是发出一个注定失败的调用。PANU / NAP 已直接用 BlueZ 的 `Network1.Connect`
+  + 完整 128 位 UUID 实现；和原版一样，生成的 `bnep` 接口上的 IP/DHCP 配置交给
+  操作系统网络管理器负责。
+- **音频 profile 切换：真机上刻意只读。** BlueZ 没有切换 A2DP/HFP profile 的
+  API，原版之所以打 ✓，是因为它集成了 **PulseAudio**（或 bluez-alsa/PipeWire）。
+  本项目的界面会列出设备宣称支持的 profile，但不拉取任何音频服务器，因此真机
+  只读；`--demo` 里提供切换仅为演示。
+
+如果你确实需要在这两项上和原版完全对齐，正路就是加入 ModemManager /
+PulseAudio 集成——我们之所以没做，正是为了守住零依赖的目标。
 
 ## 安装
 

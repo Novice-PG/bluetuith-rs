@@ -152,6 +152,38 @@ All images are generated directly from the rendering code by
 | `--demo` simulated adapter | — | ✓ |
 | Static multi-arch `.deb` packages | — | ✓ |
 
+### Why a few rows are qualified
+
+The three qualified rows are not unfinished work — they are deliberate scope
+decisions. bluetuith-rs is designed as a **single static binary with no runtime
+dependencies beyond D-Bus/BlueZ**. The upstream Go project achieves the same
+checkmarks by depending on extra system daemons, which this project declines to
+require:
+
+- **OBEX receive + `receive-dir`** is fully implemented in-process: we register
+  a real `org.bluez.obex.Agent1`, prompt on incoming pushes, write under
+  `receive-dir` and reject path-traversal filenames. No extra daemon is needed
+  beyond `bluez-obexd` itself (which provides the OBEX service). The only caveat
+  is the common one for all hardware features: locally we verify the D-Bus
+  contract with a fake obexd; an end-to-end push needs a peer device.
+- **DUN (dial-up)** is intentionally **not implemented**. BlueZ's `Network1`
+  only offers BNEP (PAN) roles; DUN dial-up requires a PPP stack. Upstream
+  marks DUN ✓ by integrating **ModemManager** (which wraps `pppd`). Adding that
+  here would mean a heavy runtime dependency, so selecting DUN reports
+  "not provided by BlueZ `Network1`" rather than firing a doomed call. PANU/NAP
+  are implemented directly over BlueZ `Network1.Connect` with full 128-bit
+  UUIDs; note that as with the original, IP/DHCP setup on the resulting `bnep`
+  interface is left to the OS network manager.
+- **Audio profile switching** is intentionally **read-only on real hardware**.
+  BlueZ has no API to switch A2DP/HFP profiles — upstream marks this ✓ by
+  integrating **PulseAudio** (or bluez-alsa/PipeWire). We list the profiles a
+  device advertises but do not pull in an audio server; switching is offered
+  only in `--demo` for illustration.
+
+If you want full parity with upstream on DUN or audio switching, the honest way
+is to add ModemManager / PulseAudio integration — we have kept those out on
+purpose to preserve the zero-dependency goal.
+
 ## Install
 
 ### Debian / Ubuntu package
