@@ -5,6 +5,8 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 
+English · [简体中文](README.zh-CN.md)
+
 A full-featured Bluetooth manager for the terminal, written from scratch in
 **Rust** with [ratatui](https://ratatui.rs/) and
 [zbus](https://github.com/dbus2/zbus).
