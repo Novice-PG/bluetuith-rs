@@ -31,6 +31,12 @@ pub fn duration(ms: u64) -> String {
 }
 
 /// Truncate to a display width, adding an ellipsis when cut.
+///
+/// Uses `UnicodeWidthStr` on the accumulated prefix, not the sum of per-char
+/// `UnicodeWidthChar` widths: the latter disagrees for grapheme clusters
+/// (keycap `1️⃣`, ZWJ families `👨‍👩‍👧`, skin-tone `👍🏽`), which made an emoji
+/// string overflow the requested width. Reserve one cell for the ellipsis and
+/// stop before exceeding `width`.
 pub fn truncate(s: &str, width: usize) -> String {
     if UnicodeWidthStr::width(s) <= width {
         return s.to_string();
@@ -38,15 +44,20 @@ pub fn truncate(s: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
+    let budget = width - 1; // reserve the ellipsis cell
+                            // Fast path: ASCII is one cell per byte, so no grapheme measurement needed.
+    if s.is_ascii() {
+        let mut out = String::from(&s[..budget.min(s.len())]);
+        out.push('…');
+        return out;
+    }
     let mut out = String::new();
-    let mut w = 0;
     for c in s.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if w + cw + 1 > width {
+        out.push(c);
+        if UnicodeWidthStr::width(out.as_str()) > budget {
+            out.pop();
             break;
         }
-        out.push(c);
-        w += cw;
     }
     out.push('…');
     out
@@ -133,5 +144,22 @@ mod tests {
             UnicodeWidthStr::width(truncate("hello world", 6).as_str()),
             6
         );
+    }
+
+    #[test]
+    fn truncate_never_overflows_with_emoji_graphemes() {
+        // Regression: per-char UnicodeWidthChar width disagrees with the
+        // string-level width for keycaps/ZWJ sequences, so summing char widths
+        // let the result overflow the requested width.
+        for s in ["1️⃣2️⃣", "👨‍👩‍👧", "❤️🧡💛", "👍🏽👍🏽", "🇺🇸🇨🇳"]
+        {
+            for w in 1..8 {
+                let t = truncate(s, w);
+                assert!(
+                    UnicodeWidthStr::width(t.as_str()) <= w,
+                    "truncate({s:?}, {w}) = {t:?} is wider than {w}"
+                );
+            }
+        }
     }
 }

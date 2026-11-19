@@ -952,6 +952,72 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or(false)
     });
 
+    println!("=== malformed / extreme D-Bus property values must not panic ===");
+    {
+        let mut o = s.objects.lock().unwrap().clone();
+        if let Some(di) = o.get_mut(&opath(DEV)) {
+            if let Some(d) = di.get_mut(&iname("org.bluez.Device1")) {
+                // Wrong types everywhere a getter is used.
+                set(d, "RSSI", ov_str("not-a-number"));
+                set(d, "TxPower", ov_strings(&["array", "instead"]));
+                set(d, "Class", OwnedValue::from(true)); // bool where u32
+                set(d, "Appearance", ov_str("huge"));
+                set(d, "Paired", OwnedValue::from(1u32)); // int where bool
+                set(d, "Connected", OwnedValue::from(-1i64));
+                set(d, "UUIDs", ov_str("not-an-array"));
+                set(d, "Name", OwnedValue::from(12345u32)); // int where string
+                set(d, "Alias", ov_str(&"名".repeat(2000))); // huge unicode
+
+                // Extreme integer widths on numeric fields.
+                set(d, "RSSI", OwnedValue::from(i64::MIN));
+                set(d, "Class", OwnedValue::from(u64::MAX));
+            }
+        }
+        if let Some(pi) = o.get_mut(&opath(PLAYER)) {
+            if let Some(p) = pi.get_mut(&iname("org.bluez.MediaPlayer1")) {
+                set(p, "Position", OwnedValue::from(u64::MAX)); // wider than u32
+                set(p, "Status", OwnedValue::from(42i32)); // int where string
+                set(p, "Shuffle", OwnedValue::from(true)); // bool where string
+                set(p, "Volume", ov_str("loud")); // string where u8
+
+                // Track with a completely wrong type (not a dict at all).
+                set(p, "Track", ov_str("not-a-dict"));
+            }
+        }
+        if let Some(ti) = o.get_mut(&opath("/org/bluez/obex/transfer0")) {
+            if let Some(p) = ti.get_mut(&iname("org.bluez.obex.Transfer1")) {
+                set(p, "Size", ov_str("enormous"));
+                set(p, "Transferred", OwnedValue::from(i64::MIN));
+                set(p, "Filename", ov_str(&"x".repeat(5000)));
+            }
+        }
+        *s.objects.lock().unwrap() = o;
+    }
+    app.dispatch(Command::Refresh);
+    pump(&mut app, 400);
+    check(
+        &mut r,
+        "malformed D-Bus properties handled without panic",
+        {
+            // The app is still alive, renderable, and numeric fields fell back to
+            // safe defaults rather than garbage/panic.
+            let mut t =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 36)).unwrap();
+            let renders = t.draw(|f| bluetuith_rs::ui::render(f, &mut app)).is_ok();
+            renders
+                && app
+                    .devices
+                    .first()
+                    .map(|d| d.rssi.is_none())
+                    .unwrap_or(true)
+                && app
+                    .devices
+                    .first()
+                    .map(|d| d.class.is_none())
+                    .unwrap_or(true)
+        },
+    );
+
     println!("=== a slow OBEX call must not stall the polling thread ===");
     s.slow_obex.store(true, Ordering::Relaxed);
     s.calls.lock().unwrap().clear();

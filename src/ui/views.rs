@@ -57,8 +57,9 @@ pub fn header(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .map(|a| a.display_name())
         .unwrap_or_else(|| tr.msg_no_adapter.into());
     let adapter_id = ad.map(|a| a.id.clone()).unwrap_or_default();
-    let n = app.visible_devices().len();
-    let connected = app.visible_devices().iter().filter(|d| d.connected).count();
+    let visible = app.visible_devices();
+    let n = visible.len();
+    let connected = visible.iter().filter(|d| d.connected).count();
 
     let row0 = Rect {
         x: area.x,
