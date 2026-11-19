@@ -127,7 +127,7 @@ pub trait Backend: Send {
 pub fn service_name(uuid: &str, lang: crate::i18n::Lang) -> &'static str {
     use crate::i18n::Lang;
     let u = uuid.to_ascii_lowercase();
-    let short = if u.len() == 36 {
+    let short = if u.is_ascii() && u.len() == 36 {
         &u[4..8]
     } else {
         u.trim_start_matches("0x")

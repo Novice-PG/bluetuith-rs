@@ -593,7 +593,11 @@ pub fn details(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Style::new().fg(t.accent).add_modifier(Modifier::BOLD),
         )));
         for u in d.uuids.iter().take(6) {
-            let short = if u.len() == 36 { &u[4..8] } else { u.as_str() };
+            let short = if u.is_ascii() && u.len() == 36 {
+                &u[4..8]
+            } else {
+                u.as_str()
+            };
             lines.push(Line::from(vec![
                 Span::styled("   • ", Style::new().fg(t.accent_soft)),
                 Span::styled(

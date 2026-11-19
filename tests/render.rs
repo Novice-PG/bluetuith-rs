@@ -1049,3 +1049,109 @@ fn a_second_auth_request_supersedes_the_first() {
     );
     assert_eq!(a.auth.as_ref().map(|r| r.id), Some(42));
 }
+
+#[test]
+fn repeated_quit_keeps_a_single_confirm_dialog() {
+    use bluetuith_rs::keybind::Action;
+    let cfg = Config {
+        demo: true,
+        confirm_on_quit: true,
+        language: "en".into(),
+        ..Config::default()
+    };
+    let mut a = App::new(cfg, Box::new(DemoBackend::new()));
+    // A stale Confirm overlay left deeper in the stack by an earlier dialog.
+    a.push(Overlay::Confirm);
+    a.do_action(Action::Quit);
+    a.do_action(Action::Quit);
+    assert_eq!(
+        a.overlays
+            .iter()
+            .filter(|&&o| o == Overlay::Confirm)
+            .count(),
+        1,
+        "repeated opens must not stack multiple Confirm overlays"
+    );
+    assert!(a.confirm.is_some());
+}
+
+#[test]
+fn closing_an_overlay_above_confirm_keeps_confirm_state() {
+    let cfg = Config {
+        demo: true,
+        confirm_on_quit: true,
+        language: "en".into(),
+        ..Config::default()
+    };
+    let mut a = App::new(cfg, Box::new(DemoBackend::new()));
+    a.do_action(bluetuith_rs::keybind::Action::Quit);
+    a.push(Overlay::Help); // open another overlay on top of the Confirm dialog
+    a.close_overlay(); // closes Help, not Confirm
+    assert!(
+        a.confirm.is_some(),
+        "closing an unrelated overlay must not drop the live confirm state"
+    );
+    assert!(a.overlays.contains(&Overlay::Confirm));
+}
+
+#[test]
+fn non_ascii_uuid_never_panics_when_rendering() {
+    use bluetuith_rs::backend::Event;
+    use bluetuith_rs::model::Device;
+    // 36 bytes long, but byte 4 sits inside a multi-byte char (the keycap
+    // sequence), which used to make `&u[4..8]` panic on a char boundary.
+    let bad_uuid = format!("{}x", "1️⃣".repeat(5));
+    assert_eq!(bad_uuid.len(), 36);
+    let d = Device {
+        address: "AA:BB:CC:DD:EE:FF".into(),
+        name: "Phone".into(),
+        uuids: vec![bad_uuid],
+        ..Default::default()
+    };
+    let mut a = app();
+    a.apply_event(Event::Snapshot {
+        adapters: vec![],
+        devices: vec![d],
+    });
+    render_mut(&mut a, 120, 40); // device details pane
+    a.push(Overlay::DeviceInfo);
+    render_mut(&mut a, 120, 40); // device info overlay
+}
+
+#[test]
+fn stale_mouse_click_index_cannot_corrupt_menu_selection() {
+    use bluetuith_rs::app::MenuId;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+    let mut a = app();
+    a.open_menu_at(MenuId::View);
+    let n = a.menu_items.len();
+    // A click region cached from an earlier, larger layout (stale index).
+    a.layout.overlay_rect = Some(Rect::new(0, 0, 120, 40));
+    a.layout.overlay_items = vec![(Rect::new(0, 0, 40, 1), n + 50)];
+    a.layout.help_rects.clear();
+    a.on_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 1,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert!(
+        a.menu_index < a.menu_items.len(),
+        "a stale mouse index must not leave menu_index out of range"
+    );
+}
+
+#[test]
+fn language_switch_reclamps_device_selection() {
+    use bluetuith_rs::keybind::Action;
+    let mut a = app();
+    let n = a.visible_devices().len();
+    assert!(n > 0, "demo backend should populate devices");
+    a.selected = n + 100; // deliberately stale index
+    a.do_action(Action::Language);
+    assert!(
+        a.selected < a.visible_devices().len(),
+        "switching language must re-clamp the selection to the visible list"
+    );
+}

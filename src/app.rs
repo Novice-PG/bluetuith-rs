@@ -424,6 +424,19 @@ impl App {
         self.selected_device().map(|d| d.address.clone())
     }
 
+    /// Re-clamp the device selection after anything that can change the set of
+    /// visible devices (filter, sort, language, adapter, snapshot). Without
+    /// this, a stale index leaves no row highlighted and no action targetting
+    /// the device the user last selected.
+    fn clamp_selected(&mut self) {
+        let vis = self.visible_devices().len();
+        self.selected = if vis == 0 {
+            0
+        } else {
+            self.selected.min(vis - 1)
+        };
+    }
+
     pub fn push(&mut self, o: Overlay) {
         if self.overlays.last() == Some(&o) {
             return;
@@ -439,8 +452,37 @@ impl App {
     }
 
     pub fn close_overlay(&mut self) {
-        self.overlays.pop();
-        self.confirm = None;
+        let Some(top) = self.overlays.pop() else {
+            return;
+        };
+        // Only clear the state belonging to the overlay actually being closed.
+        // Clearing `confirm` for every overlay could leave a still-open Confirm
+        // dialog with no backing state (a stale dialog that does nothing).
+        if top == Overlay::Confirm {
+            self.confirm = None;
+        }
+        // If an Auth dialog is dismissed through a generic close path (menu /
+        // mouse / palette), the backend agent is still blocked waiting for a
+        // response. Release it instead of orphaning it.
+        if top == Overlay::Auth {
+            if let Some(prev) = self.auth.take() {
+                self.dispatch(Command::RespondAuth {
+                    id: prev.id,
+                    response: AuthResponse::Reject,
+                });
+            }
+            self.auth_input.clear();
+            self.overlays.retain(|o| *o != Overlay::Auth);
+        }
+    }
+
+    /// Open a confirmation dialog as a modal singleton: drop any stale Confirm
+    /// overlay first, because `push` only de-dups adjacent overlays and repeated
+    /// opens (e.g. Quit pressed twice) would otherwise stack multiple dialogs.
+    fn open_confirm(&mut self, state: ConfirmState) {
+        self.overlays.retain(|o| *o != Overlay::Confirm);
+        self.confirm = Some(state);
+        self.push(Overlay::Confirm);
     }
 
     pub fn set_status(&mut self, level: Level, text: impl Into<String>, busy: bool) {
@@ -662,11 +704,10 @@ impl App {
         match a {
             Quit => {
                 if self.config.confirm_on_quit {
-                    self.confirm = Some(ConfirmState {
+                    self.open_confirm(ConfirmState {
                         text: self.tr().msg_quit_confirm.into(),
                         action: ConfirmAction::Quit,
                     });
-                    self.push(Overlay::Confirm);
                 } else {
                     self.running = false;
                 }
@@ -822,11 +863,10 @@ impl App {
             Remove => {
                 if let Some(d) = self.selected_device() {
                     let (addr, name) = (d.address.clone(), d.display_name());
-                    self.confirm = Some(ConfirmState {
+                    self.open_confirm(ConfirmState {
                         text: fill(self.tr().msg_remove_confirm, name),
                         action: ConfirmAction::RemoveDevice(addr),
                     });
-                    self.push(Overlay::Confirm);
                 }
             }
             Search => {
@@ -872,6 +912,9 @@ impl App {
                 if self.top_overlay() == Some(Overlay::Menu) {
                     self.rebuild_menu();
                 }
+                // The filter and kind sort use localized labels, so switching
+                // language can change which/how many devices are visible.
+                self.clamp_selected();
                 self.set_status(
                     Level::Info,
                     format!("{}: {}", self.tr().language, self.lang.name()),
@@ -1517,6 +1560,9 @@ impl App {
                     if let Some(a) = self.adapters.get(self.overlay_index).cloned() {
                         self.dispatch(Command::SelectAdapter(a.path));
                         self.selected_adapter = self.overlay_index;
+                        // The visible device set is scoped to the adapter, so
+                        // switching it can invalidate the current selection.
+                        self.clamp_selected();
                         self.close_overlay();
                     }
                     return true;
@@ -1928,23 +1974,41 @@ impl App {
         self.last_overlay_click = Some((now, idx));
 
         match o {
-            // Menus act on a single click (standard menu behaviour).
+            // Menus act on a single click (standard menu behaviour). The click
+            // index comes from the last rendered layout, which can be stale if
+            // the menu contents changed since — validate before using it.
             Overlay::Menu => {
-                self.menu_index = idx;
-                self.menu_select();
+                if idx < self.menu_items.len() {
+                    self.menu_index = idx;
+                    self.menu_select();
+                }
             }
             // The command palette is a launcher: a click activates the row.
+            // Stage 0 lists categories, stage 1 lists actions.
             Overlay::CommandPalette => {
-                self.overlay_index = idx;
-                let _ = self.overlay_key(o, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                let count = if self.palette_stage == 0 {
+                    self.palette_categories.len()
+                } else {
+                    self.palette_items.len()
+                };
+                if idx < count {
+                    self.overlay_index = idx;
+                    let _ = self.overlay_key(o, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                }
             }
             // File picker: click selects, double-click enters a folder or
             // toggles a file's checkbox.
             Overlay::FilePicker => {
+                let valid = self
+                    .file_picker
+                    .as_ref()
+                    .is_some_and(|fp| idx < fp.entries.len());
                 if let Some(fp) = self.file_picker.as_mut() {
-                    fp.index = idx;
+                    if valid {
+                        fp.index = idx;
+                    }
                 }
-                if double {
+                if double && valid {
                     self.file_picker_activate(idx);
                 }
             }
