@@ -1008,3 +1008,44 @@ fn bracketed_paste_reaches_the_active_text_input() {
     a.on_paste("ab12cd");
     assert_eq!(a.auth_input, "12", "passkey entry accepts digits only");
 }
+
+#[test]
+fn a_stale_auth_overlay_can_always_be_dismissed() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut a = app();
+    // Simulate a desync: an Auth overlay is present with no live request.
+    a.push(Overlay::Auth);
+    a.auth = None;
+    a.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        !a.overlays.contains(&Overlay::Auth),
+        "Esc must dismiss a stale Auth overlay instead of trapping the user"
+    );
+}
+
+#[test]
+fn a_second_auth_request_supersedes_the_first() {
+    use bluetuith_rs::backend::Event;
+    use bluetuith_rs::model::{AuthKind, AuthRequest};
+    let mut a = app();
+    let first = AuthRequest {
+        id: 41,
+        device: "AA:BB:CC:DD:EE:FF".into(),
+        device_name: "Phone".into(),
+        kind: AuthKind::Confirmation(1111),
+    };
+    let second = AuthRequest {
+        id: 42,
+        device: "AA:BB:CC:DD:01:01".into(),
+        device_name: "Earbuds".into(),
+        kind: AuthKind::FilePush("photo.jpg".into()),
+    };
+    a.apply_event(Event::AuthRequest(first));
+    a.apply_event(Event::AuthRequest(second));
+    // Exactly one Auth overlay, showing the newest request.
+    assert_eq!(
+        a.overlays.iter().filter(|&&o| o == Overlay::Auth).count(),
+        1
+    );
+    assert_eq!(a.auth.as_ref().map(|r| r.id), Some(42));
+}

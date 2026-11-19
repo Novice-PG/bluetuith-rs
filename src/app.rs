@@ -623,6 +623,18 @@ impl App {
             Event::Networks(n) => self.networks = n,
             Event::Profiles(p) => self.profiles = p,
             Event::AuthRequest(r) => {
+                // Only one prompt can be shown at a time. If a previous one is
+                // still pending, reject it so its D-Bus agent (which blocks on
+                // a response) is released instead of waiting forever.
+                if let Some(prev) = self.auth.take() {
+                    self.dispatch(Command::RespondAuth {
+                        id: prev.id,
+                        response: AuthResponse::Reject,
+                    });
+                }
+                // Clear any stale Auth overlay from the previous prompt, THEN
+                // install the new request (dismiss_auth_overlay clears `auth`).
+                self.dismiss_auth_overlay();
                 self.auth = Some(r);
                 self.auth_input.clear();
                 self.push(Overlay::Auth);
@@ -1299,12 +1311,27 @@ impl App {
         }
     }
 
+    /// Clear the pairing/file-push prompt and remove every Auth overlay that
+    /// may have accumulated. Used on respond and on stale-overlay dismissal so
+    /// a leftover Auth screen can never trap the user.
+    fn dismiss_auth_overlay(&mut self) {
+        self.auth = None;
+        self.auth_input.clear();
+        self.overlays.retain(|o| *o != Overlay::Auth);
+    }
+
     fn auth_key(&mut self, ev: KeyEvent) {
+        let close = self.keys.is(&ev, Action::Close) || matches!(ev.code, KeyCode::Esc);
+        // A stale Auth overlay can exist without a live request if another
+        // code path popped the overlay but left `auth`, or vice versa. Never
+        // let it trap the user: a Close/Esc with no request just dismisses it.
         let Some(req) = self.auth.clone() else {
+            if close {
+                self.dismiss_auth_overlay();
+            }
             return;
         };
         let needs_text = matches!(req.kind, AuthKind::PinCode | AuthKind::Passkey(_));
-        let close = self.keys.is(&ev, Action::Close) || matches!(ev.code, KeyCode::Esc);
         let accept = self.keys.is(&ev, Action::Select) || matches!(ev.code, KeyCode::Enter);
 
         if close {
@@ -1312,8 +1339,7 @@ impl App {
                 id: req.id,
                 response: AuthResponse::Reject,
             });
-            self.auth = None;
-            self.close_overlay();
+            self.dismiss_auth_overlay();
             return;
         }
         if accept {
@@ -1334,8 +1360,7 @@ impl App {
                 id: req.id,
                 response,
             });
-            self.auth = None;
-            self.close_overlay();
+            self.dismiss_auth_overlay();
             return;
         }
         match ev.code {
