@@ -1,7 +1,48 @@
 //! Small formatting helpers shared by the views.
 
+use std::cmp::Ordering;
+
 use crate::theme::Theme;
 use unicode_width::UnicodeWidthStr;
+
+/// ASCII case-insensitive string comparison without allocating.
+///
+/// Equivalent to `a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase())`, but
+/// byte-wise so it can be used inside a sort comparator (called O(n log n)
+/// times per frame) without two temporary `String`s per comparison.
+pub fn cmp_ascii_ci(a: &str, b: &str) -> Ordering {
+    let mut ai = a.bytes();
+    let mut bi = b.bytes();
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let (x, y) = (x.to_ascii_lowercase(), y.to_ascii_lowercase());
+                if x != y {
+                    return x.cmp(&y);
+                }
+            }
+        }
+    }
+}
+
+/// Case-insensitive substring search without allocating. `needle` must
+/// already be ASCII-lowercased (as the filter string is). Equivalent to
+/// `haystack.to_ascii_lowercase().contains(needle)`.
+pub fn contains_ascii_ci(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len())
+        .any(|w| w.iter().zip(n).all(|(&x, &y)| x.to_ascii_lowercase() == y))
+}
 
 pub fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -144,6 +185,43 @@ mod tests {
             UnicodeWidthStr::width(truncate("hello world", 6).as_str()),
             6
         );
+    }
+
+    #[test]
+    fn ascii_ci_matches_to_lowercase() {
+        // The no-alloc helpers must be exactly equivalent to the allocating
+        // originals, including for non-ASCII bytes (which to_ascii_lowercase
+        // leaves untouched).
+        let samples = [
+            "",
+            "a",
+            "A",
+            "abc",
+            "ABC",
+            "AbC",
+            "device-01",
+            "DEVICE-01",
+            "名",
+            "名👍",
+            "aa名BB",
+            "1️⃣",
+            "0x1101",
+            "AA:BB:CC:DD:EE:FF",
+        ];
+        for &a in &samples {
+            for &b in &samples {
+                let expected = a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase());
+                assert_eq!(cmp_ascii_ci(a, b), expected, "cmp({a:?},{b:?})");
+
+                let needle = a.to_ascii_lowercase();
+                let expected_contains = b.to_ascii_lowercase().contains(&needle);
+                assert_eq!(
+                    contains_ascii_ci(b, &needle),
+                    expected_contains,
+                    "contains({b:?}, {needle:?})"
+                );
+            }
+        }
     }
 
     #[test]

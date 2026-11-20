@@ -21,17 +21,21 @@ pub struct Adapter {
 }
 
 impl Adapter {
-    pub fn display_name(&self) -> String {
+    /// Borrowed display name — avoids an allocation in sort comparators.
+    pub fn display_name_ref(&self) -> &str {
         if !self.alias.is_empty() {
-            return self.alias.clone();
+            &self.alias
+        } else if !self.name.is_empty() {
+            &self.name
+        } else if !self.id.is_empty() {
+            &self.id
+        } else {
+            &self.address
         }
-        if !self.name.is_empty() {
-            return self.name.clone();
-        }
-        if !self.id.is_empty() {
-            return self.id.clone();
-        }
-        self.address.clone()
+    }
+
+    pub fn display_name(&self) -> String {
+        self.display_name_ref().to_string()
     }
 }
 
@@ -60,17 +64,21 @@ pub struct Device {
 }
 
 impl Device {
-    pub fn display_name(&self) -> String {
+    /// Borrowed display name — avoids an allocation in sort comparators.
+    pub fn display_name_ref(&self) -> &str {
         if !self.alias.is_empty() {
-            return self.alias.clone();
+            &self.alias
+        } else if !self.name.is_empty() {
+            &self.name
+        } else if !self.address.is_empty() {
+            &self.address
+        } else {
+            "Unknown device"
         }
-        if !self.name.is_empty() {
-            return self.name.clone();
-        }
-        if !self.address.is_empty() {
-            return self.address.clone();
-        }
-        "Unknown device".into()
+    }
+
+    pub fn display_name(&self) -> String {
+        self.display_name_ref().to_string()
     }
 
     pub fn kind(&self) -> DeviceKind {

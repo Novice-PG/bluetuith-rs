@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::sleep;
+use std::thread::{self, sleep};
 use std::time::{Duration, Instant};
 
 use bluetuith_rs::app::App;
@@ -1072,6 +1072,146 @@ fn main() -> anyhow::Result<()> {
         "disabled backend refuses SendFiles without a call",
         c.is_empty() && app2.status.text.contains("OBEX services are disabled"),
     );
+
+    println!("=== concurrent flood: object churn + command storm + watchdog ===");
+    {
+        use std::sync::atomic::AtomicU64;
+        let churn = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicU64::new(0));
+        // A broad rotating mix of commands. RespondAuth with arbitrary ids is
+        // included on purpose: it must be a safe no-op when no agent is pending.
+        let cmds: Vec<Command> = vec![
+            Command::Refresh,
+            Command::SetScan(true),
+            Command::SetScan(false),
+            Command::ConnectDevice(ADDR.into()),
+            Command::DisconnectDevice(ADDR.into()),
+            Command::PairDevice(ADDR.into()),
+            Command::CancelPairing(ADDR.into()),
+            Command::TrustDevice(ADDR.into(), true),
+            Command::BlockDevice(ADDR.into(), false),
+            Command::SelectAdapter("/org/bluez/hci0".into()),
+            Command::SetAdapterProperty {
+                property: bluetuith_rs::backend::AdapterProperty::Powered,
+                value: true,
+            },
+            Command::PlayerCommand(PlayerCommand::Play),
+            Command::ShowPlayer(ADDR.into()),
+            Command::HidePlayer,
+            Command::ConnectNetwork {
+                device: ADDR.into(),
+                role: NetworkRole::Panu,
+            },
+            Command::DisconnectNetwork(1),
+            Command::SetAudioProfile {
+                device: ADDR.into(),
+                profile: "a2dp".into(),
+            },
+            Command::RespondAuth {
+                id: 999_999,
+                response: AuthResponse::Accept,
+            },
+            Command::RefreshNetworks(ADDR.into()),
+            Command::RefreshProfiles(ADDR.into()),
+            Command::SuspendTransfer(1),
+            Command::ResumeTransfer(1),
+            Command::CancelTransfer(1),
+        ];
+
+        // Mutator threads churn the untrusted D-Bus property tree with
+        // adversarial values and structural changes while the backend polls.
+        thread::scope(|scope| {
+            for t in 0..3u64 {
+                let s = s.clone();
+                let churn = churn.clone();
+                let stop = stop.clone();
+                let finished = finished.clone();
+                scope.spawn(move || {
+                    let mut i = 0u64;
+                    while !stop.load(Ordering::Relaxed) && i < 200_000 {
+                        i += 1;
+                        let mut o = s.objects.lock().unwrap().clone();
+                        if let Some(di) = o.get_mut(&opath(DEV)) {
+                            if let Some(d) = di.get_mut(&iname("org.bluez.Device1")) {
+                                set(d, "RSSI", OwnedValue::from(i64::MIN.wrapping_add(i as i64)));
+                                set(d, "Class", OwnedValue::from(u64::MAX));
+                                set(d, "Connected", OwnedValue::from((i % 2) == 0));
+                                set(d, "Alias", ov_str(&"名👍".repeat((i % 40) as usize)));
+                                set(
+                                    d,
+                                    "UUIDs",
+                                    ov_strings(&["0000110b-0000-1000-8000-00805f9b34fb"]),
+                                );
+                                if i % 5 == 0 {
+                                    set(d, "Battery", OwnedValue::from((i % 101) as u8));
+                                }
+                            }
+                        }
+                        if let Some(pi) = o.get_mut(&opath(PLAYER)) {
+                            if let Some(p) = pi.get_mut(&iname("org.bluez.MediaPlayer1")) {
+                                set(p, "Position", OwnedValue::from(u64::MAX - i));
+                                set(p, "Volume", OwnedValue::from((i % 256) as u8));
+                                set(p, "Track", ov_str("wrong-type"));
+                            }
+                        }
+                        *s.objects.lock().unwrap() = o;
+                        churn.fetch_add(1, Ordering::Relaxed);
+                        if (i + t) % 50 == 0 {
+                            sleep(Duration::from_millis(1));
+                        }
+                    }
+                    finished.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+
+            // Main thread: flood commands + ticks, with a watchdog on churn.
+            let deadline = Instant::now() + Duration::from_secs(8);
+            let mut last_churn = 0u64;
+            let mut last_progress = Instant::now();
+            let mut iter = 0usize;
+            let mut watchdog_ok = true;
+            while Instant::now() < deadline {
+                app.dispatch(cmds[iter % cmds.len()].clone());
+                iter += 1;
+                app.tick();
+                let c = churn.load(Ordering::Relaxed);
+                if c != last_churn {
+                    last_churn = c;
+                    last_progress = Instant::now();
+                } else if last_progress.elapsed() > Duration::from_secs(5) {
+                    watchdog_ok = false; // mutators stalled => probable deadlock
+                    break;
+                }
+                if iter % 100 == 0 {
+                    sleep(Duration::from_millis(1));
+                }
+            }
+            stop.store(true, Ordering::Relaxed);
+            // Give mutators a moment to observe the stop flag and exit cleanly.
+            let join_deadline = Instant::now() + Duration::from_secs(5);
+            while finished.load(Ordering::Relaxed) < 3 && Instant::now() < join_deadline {
+                sleep(Duration::from_millis(5));
+            }
+            check(
+                &mut r,
+                "concurrent flood: no deadlock (mutators kept progressing and exited)",
+                watchdog_ok && last_churn >= 100 && finished.load(Ordering::Relaxed) == 3,
+            );
+            check(
+                &mut r,
+                "concurrent flood: app still renderable and log bounded",
+                {
+                    let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 36))
+                        .unwrap();
+                    t.draw(|f| bluetuith_rs::ui::render(f, &mut app)).is_ok()
+                        && app.log.len() <= 500
+                },
+            );
+        });
+        // Reset objects after the flood so later checks are not affected.
+        *s.objects.lock().unwrap() = build_objects();
+    }
 
     println!("\n=== result: {} passed, {} failed ===", r.pass, r.fail);
     if r.fail > 0 {

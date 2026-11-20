@@ -434,9 +434,56 @@ fn gen_mouse(r: &mut Rng) -> MouseEvent {
 // ---------------------------------------------------------------------------
 // Structural invariants — checked after every step.
 // ---------------------------------------------------------------------------
+/// Hard upper bounds for every collection in the App. These are tripwires for
+/// slow leaks: any field that grows past its bound is being appended to without
+/// ever being cleared/replaced, which would eventually exhaust memory.
+const COLLECTION_BOUNDS: &[(&str, usize)] = &[
+    ("log", 500),
+    ("overlays", 256),
+    ("devices", 64),
+    ("adapters", 16),
+    ("transfers", 64),
+    ("networks", 64),
+    ("profiles", 64),
+    ("menu_items", 128),
+    ("palette_items", 256),
+    ("palette_categories", 64),
+];
+
+fn collection_lengths(a: &App) -> [usize; COLLECTION_BOUNDS.len()] {
+    [
+        a.log.len(),
+        a.overlays.len(),
+        a.devices.len(),
+        a.adapters.len(),
+        a.transfers.len(),
+        a.networks.len(),
+        a.profiles.len(),
+        a.menu_items.len(),
+        a.palette_items.len(),
+        a.palette_categories.len(),
+    ]
+}
+
 fn check_invariants(a: &App) -> Result<(), String> {
     if a.log.len() > 500 {
         return Err(format!("log grew to {} (>500)", a.log.len()));
+    }
+    let lens = collection_lengths(a);
+    for ((name, bound), len) in COLLECTION_BOUNDS.iter().zip(lens.iter()) {
+        if *len > *bound {
+            return Err(format!(
+                "collection '{name}' leaked to {len} (bound {bound})"
+            ));
+        }
+    }
+    if let Some(fp) = &a.file_picker {
+        if fp.entries.len() > 100_000 {
+            return Err(format!(
+                "file_picker entries leaked to {}",
+                fp.entries.len()
+            ));
+        }
     }
     let auth_overlays = a.overlays.iter().filter(|&&o| o == Overlay::Auth).count();
     let confirm_overlays = a
@@ -550,6 +597,7 @@ fn main() {
     app.apply_event(gen_snapshot(&mut r));
 
     let mut max_overlays = 0usize;
+    let mut max_lens = [0usize; COLLECTION_BOUNDS.len()];
     let mut resizes = 0u64;
     let mut renders = 0u64;
 
@@ -647,6 +695,10 @@ fn main() {
             Err(_) => Err("PANIC in invariant check".into()),
         };
         max_overlays = max_overlays.max(app.overlays.len());
+        let cur_lens = collection_lengths(&app);
+        for (m, &c) in max_lens.iter_mut().zip(cur_lens.iter()) {
+            *m = (*m).max(c);
+        }
 
         // Periodically re-render at the current (possibly extreme) size.
         if step % 16 == 0 {
@@ -672,4 +724,8 @@ fn main() {
     println!(
         "\n=== PASS: {steps} steps, seed {seed:#x} | resizes {resizes} | renders {renders} | max overlay depth {max_overlays} ==="
     );
+    println!("  peak collection lengths:");
+    for ((name, bound), m) in COLLECTION_BOUNDS.iter().zip(max_lens.iter()) {
+        println!("    {name:<20} peak {m:>6} / bound {bound}");
+    }
 }

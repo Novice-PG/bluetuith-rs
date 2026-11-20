@@ -383,20 +383,15 @@ impl App {
             .filter(|d| ap.is_empty() || d.adapter.is_empty() || d.adapter == ap)
             .filter(|d| {
                 needle.is_empty()
-                    || d.display_name().to_ascii_lowercase().contains(&needle)
-                    || d.address.to_ascii_lowercase().contains(&needle)
-                    || d.kind()
-                        .label(self.lang)
-                        .to_ascii_lowercase()
-                        .contains(&needle)
+                    || util::contains_ascii_ci(d.display_name_ref(), &needle)
+                    || util::contains_ascii_ci(&d.address, &needle)
+                    || util::contains_ascii_ci(d.kind().label(self.lang), &needle)
             })
             .collect();
         match self.sort {
-            SortKey::Name => out.sort_by(|a, b| {
-                a.display_name()
-                    .to_ascii_lowercase()
-                    .cmp(&b.display_name().to_ascii_lowercase())
-            }),
+            SortKey::Name => {
+                out.sort_by(|a, b| util::cmp_ascii_ci(a.display_name_ref(), b.display_name_ref()))
+            }
             SortKey::Address => out.sort_by(|a, b| a.address.cmp(&b.address)),
             SortKey::Rssi => out.sort_by_key(|d| std::cmp::Reverse(d.rssi.unwrap_or(-999))),
             SortKey::Battery => out.sort_by_key(|d| std::cmp::Reverse(d.battery.unwrap_or(0))),
@@ -404,13 +399,13 @@ impl App {
                 b.connected
                     .cmp(&a.connected)
                     .then(b.paired.cmp(&a.paired))
-                    .then(a.display_name().cmp(&b.display_name()))
+                    .then_with(|| a.display_name_ref().cmp(b.display_name_ref()))
             }),
             SortKey::Kind => out.sort_by(|a, b| {
                 a.kind()
                     .label(self.lang)
                     .cmp(b.kind().label(self.lang))
-                    .then(a.display_name().cmp(&b.display_name()))
+                    .then_with(|| a.display_name_ref().cmp(b.display_name_ref()))
             }),
         }
         out
