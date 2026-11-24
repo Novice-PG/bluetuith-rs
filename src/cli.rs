@@ -211,6 +211,17 @@ pub fn apply_env(cfg: &mut Config) {
     if env("BLUETUITH_RS_DEMO", "").is_some() {
         cfg.demo = true;
     }
+    // The remaining boolean options are documented as having BLUETUITH_RS_*
+    // equivalents too; presence enables them (matching the flags above).
+    if env("BLUETUITH_RS_DISABLE_OBEX_SERVICES", "").is_some() {
+        cfg.disable_obex_services = true;
+    }
+    if env("BLUETUITH_RS_SHOW_HIDDEN_FILES", "").is_some() {
+        cfg.show_hidden_files = true;
+    }
+    if env("BLUETUITH_RS_SCAN_ON_START", "").is_some() {
+        cfg.scan_on_start = true;
+    }
 }
 
 /// Help text with the keybinding section generated from the live keymap, so
@@ -303,4 +314,40 @@ pub fn help_text() -> String {
         f3 = k(A::MenuView),
         f4 = k(A::MenuHelp),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn documented_boolean_env_vars_are_applied() {
+        let vars = [
+            "BLUETUITH_RS_DISABLE_OBEX_SERVICES",
+            "BLUETUITH_RS_SHOW_HIDDEN_FILES",
+            "BLUETUITH_RS_SCAN_ON_START",
+        ];
+        // Save any pre-existing values so the test does not depend on, or
+        // leak into, the ambient environment.
+        let saved: Vec<_> = vars.iter().map(|v| (v, std::env::var(v).ok())).collect();
+        for v in vars {
+            std::env::set_var(v, "1");
+        }
+        let mut cfg = Config {
+            disable_obex_services: false,
+            show_hidden_files: false,
+            scan_on_start: false,
+            ..Config::default()
+        };
+        apply_env(&mut cfg);
+        assert!(cfg.disable_obex_services);
+        assert!(cfg.show_hidden_files);
+        assert!(cfg.scan_on_start);
+        for (v, old) in saved {
+            match old {
+                Some(val) => std::env::set_var(v, val),
+                None => std::env::remove_var(v),
+            }
+        }
+    }
 }

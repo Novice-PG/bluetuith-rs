@@ -215,6 +215,13 @@ struct ThreadState {
     next_transfer_id: usize,
     /// Active network id -> (device address, role), so Disconnect can reach it.
     network_devices: HashMap<usize, (String, NetworkRole)>,
+    /// Stable id per "address|uuid" pair. The network list is synthesised each
+    /// poll from a HashMap of devices; deriving ids from iteration position
+    /// made the same connection get a different id on the next poll, so a
+    /// Disconnect click could target the wrong network. Keyed like transfer ids.
+    network_ids: HashMap<String, usize>,
+    /// Monotonic source for the stable network ids above.
+    next_network_id: usize,
     /// "address|uuid" pairs the user disconnected this session. BlueZ does not
     /// expose BNEP connection objects, so the network list is synthesised from
     /// connected devices; without this set a disconnect would reappear on the
@@ -308,6 +315,8 @@ fn run(
         transfer_ids: HashMap::new(),
         next_transfer_id: 1,
         network_devices: HashMap::new(),
+        network_ids: HashMap::new(),
+        next_network_id: 1,
         disconnected_networks: HashSet::new(),
         obex_agent_registered: false,
     };
@@ -1114,6 +1123,21 @@ fn transfer_id(state: &mut ThreadState, path: &str) -> usize {
     id
 }
 
+/// Stable id for a synthesised network connection, keyed by the same
+/// "address|uuid" pair used to remember disconnects. Unlike the device-index
+/// scheme this survives device order changes between polls, so the id the UI
+/// shows stays mapped to the same connection when the user clicks Disconnect.
+fn network_id(state: &mut ThreadState, addr: &str, role: NetworkRole) -> usize {
+    let key = network_key(addr, role);
+    if let Some(id) = state.network_ids.get(&key) {
+        return *id;
+    }
+    let id = state.next_network_id;
+    state.next_network_id += 1;
+    state.network_ids.insert(key, id);
+    id
+}
+
 fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState) {
     let objects = match managed_objects(conn, "org.bluez") {
         Ok(o) => o,
@@ -1198,8 +1222,12 @@ fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState) {
     let _ = tx.send(Event::Player(player));
 
     // Networks: synthesise from connected devices that advertise PAN roles.
+    // Both the id and the interface name use a stable per-connection id: the
+    // device order comes from a HashMap and changes between polls, so index-
+    // derived ids would renumber the list and make Disconnect hit a different
+    // connection than the one the user clicked.
     let mut networks = Vec::new();
-    for (i, d) in devices.iter().enumerate() {
+    for d in &devices {
         for (n, role) in [
             ("1115", NetworkRole::Panu),
             ("1116", NetworkRole::Nap),
@@ -1211,13 +1239,14 @@ fn refresh(conn: &Connection, tx: &Sender<Event>, state: &mut ThreadState) {
                     .disconnected_networks
                     .contains(&network_key(&d.address, role))
             {
+                let id = network_id(state, &d.address, role);
                 networks.push(Network {
-                    id: i * 10 + networks.len(),
+                    id,
                     device: d.address.clone(),
                     device_name: d.display_name(),
                     role,
                     connected: true,
-                    interface: format!("bnep{networks_len}", networks_len = networks.len()),
+                    interface: format!("bnep{id}"),
                     address: String::new(),
                 });
             }
@@ -1388,6 +1417,8 @@ mod tests {
             transfer_ids: HashMap::new(),
             next_transfer_id: 1,
             network_devices: HashMap::new(),
+            network_ids: HashMap::new(),
+            next_network_id: 1,
             disconnected_networks: HashSet::new(),
             obex_agent_registered: false,
         }
@@ -1526,5 +1557,23 @@ mod tests {
             network_key("AA:BB", NetworkRole::Panu),
             network_key("CC:DD", NetworkRole::Panu)
         );
+    }
+
+    #[test]
+    fn network_ids_are_stable_regardless_of_discovery_order() {
+        let mut state = empty_state();
+        // The same connection must keep its id no matter what order devices
+        // are enumerated in across polls (the object map is a HashMap).
+        let a_panu = network_id(&mut state, "AA:BB", NetworkRole::Panu);
+        let b_panu = network_id(&mut state, "CC:DD", NetworkRole::Panu);
+        let a_nap = network_id(&mut state, "AA:BB", NetworkRole::Nap);
+        assert_ne!(a_panu, b_panu);
+        assert_ne!(a_panu, a_nap);
+        // Re-lookup in a different "order" yields the same ids.
+        assert_eq!(network_id(&mut state, "AA:BB", NetworkRole::Panu), a_panu);
+        assert_eq!(network_id(&mut state, "CC:DD", NetworkRole::Panu), b_panu);
+        assert_eq!(network_id(&mut state, "AA:BB", NetworkRole::Nap), a_nap);
+        // A new connection gets a fresh, distinct id.
+        assert_ne!(network_id(&mut state, "EE:FF", NetworkRole::Panu), a_panu);
     }
 }
