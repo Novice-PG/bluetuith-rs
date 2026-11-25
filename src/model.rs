@@ -133,12 +133,35 @@ pub enum DeviceKind {
 
 impl DeviceKind {
     pub fn from_device(d: &Device) -> Self {
-        let hay = format!("{} {} {} {}", d.name, d.alias, d.icon, d.modalias).to_ascii_lowercase();
-        let uuids = d.uuids.join(" ").to_ascii_lowercase();
+        // Build one lowercased haystack in a single allocation. Lowercasing only
+        // touches ASCII bytes (all < 0x80), so it preserves UTF-8 validity and
+        // produces exactly the same bytes as `to_ascii_lowercase` on the joined
+        // string — without the separate join + lowercase allocations.
+        let mut bytes =
+            Vec::with_capacity(d.name.len() + d.alias.len() + d.icon.len() + d.modalias.len() + 3);
+        for (i, part) in [&d.name, &d.alias, &d.icon, &d.modalias]
+            .into_iter()
+            .enumerate()
+        {
+            if i > 0 {
+                bytes.push(b' ');
+            }
+            bytes.extend_from_slice(part.as_bytes());
+        }
+        for b in &mut bytes {
+            *b = b.to_ascii_lowercase();
+        }
+        let hay = String::from_utf8(bytes).expect("ASCII lowercasing preserves UTF-8");
 
+        // A short UUID such as "110b" matches a bare form or a 128-bit
+        // "0000110b-...". Checking each advertised UUID case-insensitively is
+        // equivalent to searching the old joined+lowercased string: the old
+        // `full` form always contains `short`, so its check was redundant.
+        // No intermediate string is allocated here.
         let has = |short: &str| {
-            let full = format!("0000{}-0000-1000-8000-00805f9b34fb", short);
-            uuids.contains(&full) || uuids.contains(short)
+            d.uuids
+                .iter()
+                .any(|u| crate::util::contains_ascii_ci(u, short))
         };
 
         // Product-name keywords are the most reliable signal, so they win
@@ -666,5 +689,140 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(d.kind(), DeviceKind::Unknown);
+    }
+
+    // Reference copy of the pre-optimization `from_device` decision logic.
+    // Keeps the exact lookup order and string semantics so the optimized
+    // implementation can be proven equivalent over many randomized devices.
+    fn kind_reference(d: &Device) -> DeviceKind {
+        use DeviceKind::*;
+        let hay = format!("{} {} {} {}", d.name, d.alias, d.icon, d.modalias).to_ascii_lowercase();
+        let uuids = d.uuids.join(" ").to_ascii_lowercase();
+        let has = |short: &str| {
+            let full = format!("0000{}-0000-1000-8000-00805f9b34fb", short);
+            uuids.contains(&full) || uuids.contains(short)
+        };
+        if hay.contains("headset") {
+            return Headset;
+        }
+        if hay.contains("headphone")
+            || hay.contains("earphone")
+            || hay.contains("earbud")
+            || hay.contains("airpod")
+        {
+            return Headphones;
+        }
+        if hay.contains("speaker") {
+            return Speaker;
+        }
+        if hay.contains("mouse") || hay.contains("mice") {
+            return Mouse;
+        }
+        if hay.contains("keyboard") {
+            return Keyboard;
+        }
+        if hay.contains("gamepad") || hay.contains("controller") || hay.contains("joystick") {
+            return Gamepad;
+        }
+        if hay.contains("watch") || hay.contains("wearable") {
+            return Watch;
+        }
+        if hay.contains("printer") {
+            return Printer;
+        }
+        if hay.contains("camera") || hay.contains("imaging") {
+            return Camera;
+        }
+        if hay.contains("computer") || hay.contains("laptop") || hay.contains("desktop") {
+            return Computer;
+        }
+        if hay.contains("phone") || hay.contains("smartphone") || hay.contains("mobile") {
+            return Phone;
+        }
+        if has("1108") || has("111e") || has("111f") {
+            return Headset;
+        }
+        if has("110b") {
+            return Headphones;
+        }
+        if hay.contains("audio") && has("110a") {
+            return AudioCard;
+        }
+        if has("1115") || has("1116") || has("1103") || hay.contains("network") {
+            return Network;
+        }
+        if has("1812") || hay.contains("input") {
+            return Keyboard;
+        }
+        if let Some(class) = d.class {
+            match (class >> 8) & 0x1f {
+                0x01 => return Computer,
+                0x02 => return Phone,
+                0x05 => return Keyboard,
+                0x06 => return Camera,
+                0x07 => return Printer,
+                _ => {}
+            }
+        }
+        Unknown
+    }
+
+    #[test]
+    fn optimized_from_device_matches_reference_over_many_inputs() {
+        const NAMES: &[&str] = &[
+            "",
+            "Headphones",
+            "earbuds",
+            "SPEAKER",
+            "mouse",
+            "Keyboard",
+            "game controller",
+            "smartwatch",
+            "printer",
+            "camera",
+            "laptop",
+            "smartphone",
+            "audio device",
+            "network",
+            "generic gadget",
+            "名👍 Head Phone",
+            "MiCe",
+            "AIRPOD",
+        ];
+        const UUIDS: &[&str] = &[
+            "",
+            "1108",
+            "111e",
+            "110b",
+            "110a",
+            "1115",
+            "1812",
+            "0x1103",
+            "0000110b-0000-1000-8000-00805f9b34fb",
+            "00001812-0000-1000-8000-00805f9b34fb",
+        ];
+        let mut state = 0x1234_5678_u64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            state
+        };
+        for _ in 0..3000 {
+            let d = Device {
+                name: NAMES[(next() as usize) % NAMES.len()].into(),
+                alias: NAMES[(next() as usize) % NAMES.len()].into(),
+                icon: NAMES[(next() as usize) % NAMES.len()].into(),
+                modalias: NAMES[(next() as usize) % NAMES.len()].into(),
+                uuids: (0..(next() % 4))
+                    .map(|_| UUIDS[(next() as usize) % UUIDS.len()].into())
+                    .collect(),
+                class: if next() % 2 == 0 {
+                    Some((next() as u32) % 0x100000)
+                } else {
+                    None
+                },
+                ..Default::default()
+            };
+            assert_eq!(d.kind(), kind_reference(&d), "device = {d:?}");
+        }
     }
 }

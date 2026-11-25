@@ -401,12 +401,24 @@ impl App {
                     .then(b.paired.cmp(&a.paired))
                     .then_with(|| a.display_name_ref().cmp(b.display_name_ref()))
             }),
-            SortKey::Kind => out.sort_by(|a, b| {
-                a.kind()
-                    .label(self.lang)
-                    .cmp(b.kind().label(self.lang))
-                    .then_with(|| a.display_name_ref().cmp(b.display_name_ref()))
-            }),
+            SortKey::Kind => {
+                // `DeviceKind::from_device` allocates two lowercased strings,
+                // so calling it inside the comparator recomputes them O(n log n)
+                // times. Compute each device's label once, sort the pairs by the
+                // cached label, then copy the order back into `out` — identical
+                // result at a fraction of the cost.
+                let mut decorated: Vec<(&Device, &'static str)> = out
+                    .iter()
+                    .map(|&d| (d, d.kind().label(self.lang)))
+                    .collect();
+                decorated.sort_by(|(da, ka), (db, kb)| {
+                    ka.cmp(kb)
+                        .then_with(|| da.display_name_ref().cmp(db.display_name_ref()))
+                });
+                for (slot, (d, _)) in out.iter_mut().zip(decorated) {
+                    *slot = d;
+                }
+            }
         }
         out
     }
